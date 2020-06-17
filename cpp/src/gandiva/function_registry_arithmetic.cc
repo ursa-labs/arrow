@@ -61,6 +61,13 @@ std::vector<NativeFunction> GetArithmeticFunctionRegistry() {
                      "castDECIMALNullOnOverflow_decimal128"),
 
       UNARY_SAFE_NULL_IF_NULL(castDATE, {}, int64, date64),
+      UNARY_SAFE_NULL_IF_NULL(castDATE, {}, int32, date32),
+      UNARY_SAFE_NULL_IF_NULL(castDATE, {}, date32, date64),
+
+      UNARY_UNSAFE_NULL_IF_NULL(castINT, {}, utf8, int32),
+      UNARY_UNSAFE_NULL_IF_NULL(castBIGINT, {}, utf8, int64),
+      UNARY_UNSAFE_NULL_IF_NULL(castFLOAT4, {}, utf8, float32),
+      UNARY_UNSAFE_NULL_IF_NULL(castFLOAT8, {}, utf8, float64),
 
       // add/sub/multiply/divide/mod
       BINARY_SYMMETRIC_FN(add, {}), BINARY_SYMMETRIC_FN(subtract, {}),

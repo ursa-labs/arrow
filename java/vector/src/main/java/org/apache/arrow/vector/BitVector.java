@@ -20,8 +20,10 @@ package org.apache.arrow.vector;
 import static org.apache.arrow.memory.util.LargeMemoryUtil.capAtMaxInt;
 import static org.apache.arrow.vector.NullCheckingForGet.NULL_CHECKING_ENABLED;
 
+import org.apache.arrow.memory.ArrowBuf;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.util.ArrowBufPointer;
+import org.apache.arrow.memory.util.hash.ArrowBufHasher;
 import org.apache.arrow.util.Preconditions;
 import org.apache.arrow.vector.complex.impl.BitReaderImpl;
 import org.apache.arrow.vector.complex.reader.FieldReader;
@@ -33,14 +35,17 @@ import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.util.OversizedAllocationException;
 import org.apache.arrow.vector.util.TransferPair;
 
-import io.netty.buffer.ArrowBuf;
-
 /**
  * BitVector implements a fixed width (1 bit) vector of
  * boolean values which could be null. Each value in the vector corresponds
  * to a single bit in the underlying data stream backing the vector.
  */
 public final class BitVector extends BaseFixedWidthVector {
+
+  private static final int HASH_CODE_FOR_ZERO = 17;
+
+  private static final int HASH_CODE_FOR_ONE = 19;
+
   private final FieldReader reader;
 
   /**
@@ -74,7 +79,7 @@ public final class BitVector extends BaseFixedWidthVector {
    * @param allocator allocator for memory management.
    */
   public BitVector(Field field, BufferAllocator allocator) {
-    super(field, allocator,0);
+    super(field, allocator, 0);
     reader = new BitReaderImpl(BitVector.this);
   }
 
@@ -158,10 +163,8 @@ public final class BitVector extends BaseFixedWidthVector {
    * @param target     destination vector
    */
   public void splitAndTransferTo(int startIndex, int length, BaseFixedWidthVector target) {
-    Preconditions.checkArgument(startIndex >= 0 && startIndex < valueCount,
-        "Invalid startIndex: %s", startIndex);
-    Preconditions.checkArgument(startIndex + length <= valueCount,
-        "Invalid length: %s", length);
+    Preconditions.checkArgument(startIndex >= 0 && length >= 0 && startIndex + length <= valueCount,
+        "Invalid parameters startIndex: %s, length: %s for valueCount: %s", startIndex, length, valueCount);
     compareTypes(target, "splitAndTransferTo");
     target.clear();
     target.validityBuffer = splitAndTransferBuffer(startIndex, length, target,
@@ -471,6 +474,24 @@ public final class BitVector extends BaseFixedWidthVector {
   @Override
   public ArrowBufPointer getDataPointer(int index, ArrowBufPointer reuse) {
     throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public int hashCode(int index) {
+    if (isNull(index)) {
+      return ArrowBufPointer.NULL_HASH_CODE;
+    } else {
+      if (get(index) == 0) {
+        return HASH_CODE_FOR_ZERO;
+      } else {
+        return HASH_CODE_FOR_ONE;
+      }
+    }
+  }
+
+  @Override
+  public int hashCode(int index, ArrowBufHasher hasher) {
+    return hashCode(index);
   }
 
   /**

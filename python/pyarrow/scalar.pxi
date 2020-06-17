@@ -30,6 +30,7 @@ cdef class NullType(Scalar):
     Singleton for null array elements.
     """
     # TODO rename this NullValue?
+
     def __cinit__(self):
         global NA
         if NA is not None:
@@ -848,12 +849,14 @@ cdef class UnionValue(ArrayValue):
 
     cdef getitem(self, int64_t i):
         cdef int child_id = self.ap.child_id(i)
-        cdef shared_ptr[CArray] child = self.ap.child(child_id)
+        cdef shared_ptr[CArray] child = self.ap.field(child_id)
+        cdef CDenseUnionArray* dense
         if self.ap.mode() == _UnionMode_SPARSE:
             return box_scalar(self.type[child_id].type, child, i)
         else:
+            dense = <CDenseUnionArray*> self.ap
             return box_scalar(self.type[child_id].type, child,
-                              self.ap.value_offset(i))
+                              dense.value_offset(i))
 
     def as_py(self):
         """
@@ -915,7 +918,7 @@ cdef class StructValue(ArrayValue):
         Return this value as a Python dict.
         """
         cdef:
-            vector[shared_ptr[CField]] child_fields = self.type.type.children()
+            vector[shared_ptr[CField]] child_fields = self.type.type.fields()
 
         wrapped_arrays = [pyarrow_wrap_array(self.ap.field(i))
                           for i in range(self.ap.num_fields())]
@@ -923,8 +926,7 @@ cdef class StructValue(ArrayValue):
         # Return the struct as a dict
         return {
             frombytes(name): child_array[self.index].as_py()
-            for name, child_array in
-            zip(child_names, wrapped_arrays)
+            for name, child_array in zip(child_names, wrapped_arrays)
         }
 
 
@@ -984,7 +986,8 @@ cdef dict _array_value_classes = {
     _Type_LARGE_LIST: LargeListValue,
     _Type_MAP: MapValue,
     _Type_FIXED_SIZE_LIST: FixedSizeListValue,
-    _Type_UNION: UnionValue,
+    _Type_SPARSE_UNION: UnionValue,
+    _Type_DENSE_UNION: UnionValue,
     _Type_BINARY: BinaryValue,
     _Type_STRING: StringValue,
     _Type_LARGE_BINARY: LargeBinaryValue,
@@ -1030,6 +1033,31 @@ cdef class ScalarValue(Scalar):
 
     def __hash__(self):
         return hash(self.as_py())
+
+
+cdef class NullScalar(ScalarValue):
+    """
+    Concrete class for null scalars.
+    """
+
+    def as_py(self):
+        """
+        Return this value as a Python None.
+        """
+        return None
+
+
+cdef class BooleanScalar(ScalarValue):
+    """
+    Concrete class for boolean scalars.
+    """
+
+    def as_py(self):
+        """
+        Return this value as a Python bool.
+        """
+        cdef CBooleanScalar* sp = <CBooleanScalar*> self.sp_scalar.get()
+        return sp.value if sp.is_valid else None
 
 
 cdef class UInt8Scalar(ScalarValue):
@@ -1162,7 +1190,25 @@ cdef class DoubleScalar(ScalarValue):
         return sp.value if sp.is_valid else None
 
 
+cdef class StringScalar(ScalarValue):
+    """
+    Concrete class for string scalars.
+    """
+
+    def as_py(self):
+        """
+        Return this value as a Python string.
+        """
+        cdef CStringScalar* sp = <CStringScalar*> self.sp_scalar.get()
+        if sp.is_valid:
+            return frombytes(pyarrow_wrap_buffer(sp.value).to_pybytes())
+        else:
+            return None
+
+
 cdef dict _scalar_classes = {
+    _Type_NA: NullScalar,
+    _Type_BOOL: BooleanScalar,
     _Type_UINT8: UInt8Scalar,
     _Type_UINT16: UInt16Scalar,
     _Type_UINT32: UInt32Scalar,
@@ -1173,6 +1219,7 @@ cdef dict _scalar_classes = {
     _Type_INT64: Int64Scalar,
     _Type_FLOAT: FloatScalar,
     _Type_DOUBLE: DoubleScalar,
+    _Type_STRING: StringScalar,
 }
 
 cdef object box_scalar(DataType type, const shared_ptr[CArray]& sp_array,

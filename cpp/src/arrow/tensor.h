@@ -15,17 +15,18 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef ARROW_TENSOR_H
-#define ARROW_TENSOR_H
+#pragma once
 
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
+#include "arrow/buffer.h"
 #include "arrow/compare.h"
+#include "arrow/result.h"
+#include "arrow/status.h"
 #include "arrow/type.h"
-#include "arrow/type_fwd.h"
 #include "arrow/type_traits.h"
 #include "arrow/util/macros.h"
 #include "arrow/util/visibility.h"
@@ -51,9 +52,6 @@ static inline bool is_tensor_supported(Type::type type_id) {
   }
   return false;
 }
-
-template <typename SparseIndexType>
-class SparseTensorImpl;
 
 namespace internal {
 
@@ -228,5 +226,3 @@ class NumericTensor : public Tensor {
 };
 
 }  // namespace arrow
-
-#endif  // ARROW_TENSOR_H

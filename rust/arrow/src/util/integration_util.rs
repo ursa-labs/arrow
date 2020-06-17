@@ -19,7 +19,7 @@
 //!
 //! These utilities define structs that read the integration JSON format for integration testing purposes.
 
-use serde_derive::Deserialize;
+use serde_derive::{Deserialize, Serialize};
 use serde_json::{Number as VNumber, Value};
 
 use crate::array::*;
@@ -27,39 +27,48 @@ use crate::datatypes::*;
 use crate::record_batch::{RecordBatch, RecordBatchReader};
 
 /// A struct that represents an Arrow file with a schema and record batches
-#[derive(Deserialize)]
-pub(crate) struct ArrowJson {
-    schema: ArrowJsonSchema,
-    batches: Vec<ArrowJsonBatch>,
+#[derive(Deserialize, Serialize, Debug)]
+pub struct ArrowJson {
+    pub schema: ArrowJsonSchema,
+    pub batches: Vec<ArrowJsonBatch>,
+    pub dictionaries: Option<Vec<ArrowJsonDictionaryBatch>>,
 }
 
 /// A struct that partially reads the Arrow JSON schema.
 ///
 /// Fields are left as JSON `Value` as they vary by `DataType`
-#[derive(Deserialize)]
-struct ArrowJsonSchema {
-    fields: Vec<Value>,
+#[derive(Deserialize, Serialize, Debug)]
+pub struct ArrowJsonSchema {
+    pub fields: Vec<Value>,
 }
 
 /// A struct that partially reads the Arrow JSON record batch
-#[derive(Deserialize)]
-struct ArrowJsonBatch {
+#[derive(Deserialize, Serialize, Debug)]
+pub struct ArrowJsonBatch {
     count: usize,
-    columns: Vec<ArrowJsonColumn>,
+    pub columns: Vec<ArrowJsonColumn>,
+}
+
+/// A struct that partially reads the Arrow JSON dictionary batch
+#[derive(Deserialize, Serialize, Debug)]
+#[allow(non_snake_case)]
+pub struct ArrowJsonDictionaryBatch {
+    id: i64,
+    data: ArrowJsonBatch,
 }
 
 /// A struct that partially reads the Arrow JSON column/array
-#[derive(Deserialize, Clone, Debug)]
-struct ArrowJsonColumn {
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct ArrowJsonColumn {
     name: String,
-    count: usize,
+    pub count: usize,
     #[serde(rename = "VALIDITY")]
-    validity: Vec<u8>,
+    pub validity: Option<Vec<u8>>,
     #[serde(rename = "DATA")]
-    data: Option<Vec<Value>>,
+    pub data: Option<Vec<Value>>,
     #[serde(rename = "OFFSET")]
-    offset: Option<Vec<Value>>, // leaving as Value as 64-bit offsets are strings
-    children: Option<Vec<ArrowJsonColumn>>,
+    pub offset: Option<Vec<Value>>, // leaving as Value as 64-bit offsets are strings
+    pub children: Option<Vec<ArrowJsonColumn>>,
 }
 
 impl ArrowJson {
@@ -116,6 +125,10 @@ impl ArrowJsonBatch {
                 }
                 let json_array: Vec<Value> = json_from_col(&col, field.data_type());
                 match field.data_type() {
+                    DataType::Null => {
+                        let arr = arr.as_any().downcast_ref::<NullArray>().unwrap();
+                        arr.equals_json(&json_array.iter().collect::<Vec<&Value>>()[..])
+                    }
                     DataType::Boolean => {
                         let arr = arr.as_any().downcast_ref::<BooleanArray>().unwrap();
                         arr.equals_json(&json_array.iter().collect::<Vec<&Value>>()[..])
@@ -227,9 +240,135 @@ impl ArrowJsonBatch {
                         let arr = arr.as_any().downcast_ref::<StructArray>().unwrap();
                         arr.equals_json(&json_array.iter().collect::<Vec<&Value>>()[..])
                     }
-                    t @ _ => panic!("Unsupported comparison for {:?}", t),
+                    DataType::Dictionary(ref key_type, _) => match key_type.as_ref() {
+                        DataType::Int8 => {
+                            let arr = arr
+                                .as_any()
+                                .downcast_ref::<Int8DictionaryArray>()
+                                .unwrap();
+                            arr.equals_json(
+                                &json_array.iter().collect::<Vec<&Value>>()[..],
+                            )
+                        }
+                        DataType::Int16 => {
+                            let arr = arr
+                                .as_any()
+                                .downcast_ref::<Int16DictionaryArray>()
+                                .unwrap();
+                            arr.equals_json(
+                                &json_array.iter().collect::<Vec<&Value>>()[..],
+                            )
+                        }
+                        DataType::Int32 => {
+                            let arr = arr
+                                .as_any()
+                                .downcast_ref::<Int32DictionaryArray>()
+                                .unwrap();
+                            arr.equals_json(
+                                &json_array.iter().collect::<Vec<&Value>>()[..],
+                            )
+                        }
+                        DataType::Int64 => {
+                            let arr = arr
+                                .as_any()
+                                .downcast_ref::<Int64DictionaryArray>()
+                                .unwrap();
+                            arr.equals_json(
+                                &json_array.iter().collect::<Vec<&Value>>()[..],
+                            )
+                        }
+                        DataType::UInt8 => {
+                            let arr = arr
+                                .as_any()
+                                .downcast_ref::<UInt8DictionaryArray>()
+                                .unwrap();
+                            arr.equals_json(
+                                &json_array.iter().collect::<Vec<&Value>>()[..],
+                            )
+                        }
+                        DataType::UInt16 => {
+                            let arr = arr
+                                .as_any()
+                                .downcast_ref::<UInt16DictionaryArray>()
+                                .unwrap();
+                            arr.equals_json(
+                                &json_array.iter().collect::<Vec<&Value>>()[..],
+                            )
+                        }
+                        DataType::UInt32 => {
+                            let arr = arr
+                                .as_any()
+                                .downcast_ref::<UInt32DictionaryArray>()
+                                .unwrap();
+                            arr.equals_json(
+                                &json_array.iter().collect::<Vec<&Value>>()[..],
+                            )
+                        }
+                        DataType::UInt64 => {
+                            let arr = arr
+                                .as_any()
+                                .downcast_ref::<UInt64DictionaryArray>()
+                                .unwrap();
+                            arr.equals_json(
+                                &json_array.iter().collect::<Vec<&Value>>()[..],
+                            )
+                        }
+                        t => panic!("Unsupported dictionary comparison for {:?}", t),
+                    },
+                    t => panic!("Unsupported comparison for {:?}", t),
                 }
             })
+    }
+
+    pub fn from_batch(batch: &RecordBatch) -> ArrowJsonBatch {
+        let mut json_batch = ArrowJsonBatch {
+            count: batch.num_rows(),
+            columns: Vec::with_capacity(batch.num_columns()),
+        };
+
+        for (col, field) in batch.columns().iter().zip(batch.schema().fields.iter()) {
+            let json_col = match field.data_type() {
+                DataType::Int8 => {
+                    let col = col.as_any().downcast_ref::<Int8Array>().unwrap();
+
+                    let mut validity: Vec<u8> = Vec::with_capacity(col.len());
+                    let mut data: Vec<Value> = Vec::with_capacity(col.len());
+
+                    for i in 0..col.len() {
+                        if col.is_null(i) {
+                            validity.push(1);
+                            data.push(
+                                Int8Type::default_value().into_json_value().unwrap(),
+                            );
+                        } else {
+                            validity.push(0);
+                            data.push(col.value(i).into_json_value().unwrap());
+                        }
+                    }
+
+                    ArrowJsonColumn {
+                        name: field.name().clone(),
+                        count: col.len(),
+                        validity: Some(validity),
+                        data: Some(data),
+                        offset: None,
+                        children: None,
+                    }
+                }
+                _ => ArrowJsonColumn {
+                    name: field.name().clone(),
+                    count: col.len(),
+                    validity: None,
+                    data: None,
+                    offset: None,
+                    children: None,
+                },
+            };
+
+            json_batch.columns.push(json_col);
+        }
+
+        json_batch
     }
 }
 
@@ -241,12 +380,15 @@ fn json_from_col(col: &ArrowJsonColumn, data_type: &DataType) -> Vec<Value> {
             json_from_fixed_size_list_col(col, &**dt, *list_size as usize)
         }
         DataType::Struct(fields) => json_from_struct_col(col, fields),
-        _ => merge_json_array(&col.validity, &col.data.clone().unwrap()),
+        _ => merge_json_array(
+            col.validity.as_ref().unwrap().as_slice(),
+            &col.data.clone().unwrap(),
+        ),
     }
 }
 
 /// Merge VALIDITY and DATA vectors from a primitive data type into a `Value` vector with nulls
-fn merge_json_array(validity: &Vec<u8>, data: &Vec<Value>) -> Vec<Value> {
+fn merge_json_array(validity: &[u8], data: &[Value]) -> Vec<Value> {
     validity
         .iter()
         .zip(data)
@@ -259,7 +401,7 @@ fn merge_json_array(validity: &Vec<u8>, data: &Vec<Value>) -> Vec<Value> {
 }
 
 /// Convert an Arrow JSON column/array of a `DataType::Struct` into a vector of `Value`
-fn json_from_struct_col(col: &ArrowJsonColumn, fields: &Vec<Field>) -> Vec<Value> {
+fn json_from_struct_col(col: &ArrowJsonColumn, fields: &[Field]) -> Vec<Value> {
     let mut values = Vec::with_capacity(col.count);
 
     let children: Vec<Vec<Value>> = col
@@ -295,7 +437,7 @@ fn json_from_list_col(col: &ArrowJsonColumn, data_type: &DataType) -> Vec<Value>
         .unwrap()
         .iter()
         .map(|o| match o {
-            Value::String(s) => *&s.parse::<usize>().unwrap(),
+            Value::String(s) => s.parse::<usize>().unwrap(),
             Value::Number(n) => n.as_u64().unwrap() as usize,
             _ => panic!(
                 "Offsets should be numbers or strings that are convertible to numbers"
@@ -305,14 +447,24 @@ fn json_from_list_col(col: &ArrowJsonColumn, data_type: &DataType) -> Vec<Value>
     let inner = match data_type {
         DataType::List(ref dt) => json_from_col(child, &**dt),
         DataType::Struct(fields) => json_from_struct_col(col, fields),
-        _ => merge_json_array(&child.validity, &child.data.clone().unwrap()),
+        _ => merge_json_array(
+            child.validity.as_ref().unwrap().as_slice(),
+            &child.data.clone().unwrap(),
+        ),
     };
 
     for i in 0..col.count {
-        match col.validity[i] {
-            0 => values.push(Value::Null),
-            1 => values.push(Value::Array(inner[offsets[i]..offsets[i + 1]].to_vec())),
-            _ => panic!("Validity data should be 0 or 1"),
+        match &col.validity {
+            Some(validity) => match &validity[i] {
+                0 => values.push(Value::Null),
+                1 => {
+                    values.push(Value::Array(inner[offsets[i]..offsets[i + 1]].to_vec()))
+                }
+                _ => panic!("Validity data should be 0 or 1"),
+            },
+            None => {
+                // Null type does not have a validity vector
+            }
         }
     }
 
@@ -333,16 +485,22 @@ fn json_from_fixed_size_list_col(
         DataType::List(ref dt) => json_from_col(child, &**dt),
         DataType::FixedSizeList(ref dt, _) => json_from_col(child, &**dt),
         DataType::Struct(fields) => json_from_struct_col(col, fields),
-        _ => merge_json_array(&child.validity, &child.data.clone().unwrap()),
+        _ => merge_json_array(
+            child.validity.as_ref().unwrap().as_slice(),
+            &child.data.clone().unwrap(),
+        ),
     };
 
     for i in 0..col.count {
-        match col.validity[i] {
-            0 => values.push(Value::Null),
-            1 => values.push(Value::Array(
-                inner[(list_size * i)..(list_size * (i + 1))].to_vec(),
-            )),
-            _ => panic!("Validity data should be 0 or 1"),
+        match &col.validity {
+            Some(validity) => match &validity[i] {
+                0 => values.push(Value::Null),
+                1 => values.push(Value::Array(
+                    inner[(list_size * i)..(list_size * (i + 1))].to_vec(),
+                )),
+                _ => panic!("Validity data should be 0 or 1"),
+            },
+            None => {}
         }
     }
 

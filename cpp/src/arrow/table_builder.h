@@ -15,14 +15,15 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef ARROW_TABLE_BUILDER_H
-#define ARROW_TABLE_BUILDER_H
+#pragma once
 
 #include <cstdint>
 #include <memory>
 #include <vector>
 
-#include "arrow/builder.h"
+#include "arrow/array/builder_base.h"
+#include "arrow/memory_pool.h"
+#include "arrow/record_batch.h"
 #include "arrow/status.h"
 #include "arrow/type.h"
 #include "arrow/util/checked_cast.h"
@@ -30,9 +31,6 @@
 #include "arrow/util/visibility.h"
 
 namespace arrow {
-
-class MemoryPool;
-class RecordBatch;
 
 /// \class RecordBatchBuilder
 /// \brief Helper class for creating record batches iteratively given a known
@@ -109,5 +107,3 @@ class ARROW_EXPORT RecordBatchBuilder {
 };
 
 }  // namespace arrow
-
-#endif  // ARROW_TABLE_BUILDER_H

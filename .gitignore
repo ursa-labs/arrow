@@ -62,7 +62,6 @@ python/doc/
 pkgs
 docker_cache
 .gdb_history
-.DS_Store
 *.orig
 .*.swp
 .*.swo
@@ -74,3 +73,10 @@ site/
 **/*.Rcheck/
 **/.Rhistory
 .Rproj.user
+
+# macOS
+cpp/Brewfile.lock.json
+.DS_Store
+
+# docker volumes used for caching
+.docker

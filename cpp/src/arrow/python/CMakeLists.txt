@@ -19,8 +19,7 @@
 # arrow_python
 #
 
-find_package(PythonLibsNew REQUIRED)
-find_package(NumPy REQUIRED)
+find_package(Python3Alt REQUIRED)
 
 add_custom_target(arrow_python-all)
 add_custom_target(arrow_python)
@@ -52,6 +51,10 @@ set_source_files_properties(init.cc
                             ON
                             SKIP_UNITY_BUILD_INCLUSION
                             ON)
+
+if(ARROW_FILESYSTEM)
+  list(APPEND ARROW_PYTHON_SRCS filesystem.cc)
+endif()
 
 set(ARROW_PYTHON_DEPENDENCIES arrow_dependencies)
 

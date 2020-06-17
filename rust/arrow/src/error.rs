@@ -26,6 +26,7 @@ use csv as csv_crate;
 pub enum ArrowError {
     MemoryError(String),
     ParseError(String),
+    SchemaError(String),
     ComputeError(String),
     DivideByZero,
     CsvError(String),
@@ -33,28 +34,25 @@ pub enum ArrowError {
     IoError(String),
     InvalidArgumentError(String),
     ParquetError(String),
+    DictionaryKeyOverflowError,
 }
 
 impl From<::std::io::Error> for ArrowError {
     fn from(error: std::io::Error) -> Self {
-        ArrowError::IoError(error.description().to_string())
+        ArrowError::IoError(error.to_string())
     }
 }
 
 impl From<csv_crate::Error> for ArrowError {
     fn from(error: csv_crate::Error) -> Self {
         match error.kind() {
-            csv_crate::ErrorKind::Io(error) => {
-                ArrowError::CsvError(error.description().to_string())
-            }
+            csv_crate::ErrorKind::Io(error) => ArrowError::CsvError(error.to_string()),
             csv_crate::ErrorKind::Utf8 { pos: _, err } => ArrowError::CsvError(format!(
                 "Encountered UTF-8 error while reading CSV file: {:?}",
-                err.description()
+                err.to_string()
             )),
             csv_crate::ErrorKind::UnequalLengths {
-                pos: _,
-                expected_len,
-                len,
+                expected_len, len, ..
             } => ArrowError::CsvError(format!(
                 "Encountered unequal lengths between records on CSV file. Expected {} \
                  records, found {} records",
@@ -67,25 +65,29 @@ impl From<csv_crate::Error> for ArrowError {
 
 impl From<::std::string::FromUtf8Error> for ArrowError {
     fn from(error: std::string::FromUtf8Error) -> Self {
-        ArrowError::ParseError(error.description().to_string())
+        ArrowError::ParseError(error.to_string())
     }
 }
 
 impl Display for ArrowError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            &ArrowError::MemoryError(ref desc) => write!(f, "Memory error: {}", desc),
-            &ArrowError::ParseError(ref desc) => write!(f, "Parser error: {}", desc),
-            &ArrowError::ComputeError(ref desc) => write!(f, "Compute error: {}", desc),
-            &ArrowError::DivideByZero => write!(f, "Divide by zero error"),
-            &ArrowError::CsvError(ref desc) => write!(f, "Csv error: {}", desc),
-            &ArrowError::JsonError(ref desc) => write!(f, "Json error: {}", desc),
-            &ArrowError::IoError(ref desc) => write!(f, "Io error: {}", desc),
-            &ArrowError::InvalidArgumentError(ref desc) => {
+        match *self {
+            ArrowError::MemoryError(ref desc) => write!(f, "Memory error: {}", desc),
+            ArrowError::ParseError(ref desc) => write!(f, "Parser error: {}", desc),
+            ArrowError::SchemaError(ref desc) => write!(f, "Schema error: {}", desc),
+            ArrowError::ComputeError(ref desc) => write!(f, "Compute error: {}", desc),
+            ArrowError::DivideByZero => write!(f, "Divide by zero error"),
+            ArrowError::CsvError(ref desc) => write!(f, "Csv error: {}", desc),
+            ArrowError::JsonError(ref desc) => write!(f, "Json error: {}", desc),
+            ArrowError::IoError(ref desc) => write!(f, "Io error: {}", desc),
+            ArrowError::InvalidArgumentError(ref desc) => {
                 write!(f, "Invalid argument error: {}", desc)
             }
-            &ArrowError::ParquetError(ref desc) => {
+            ArrowError::ParquetError(ref desc) => {
                 write!(f, "Parquet argument error: {}", desc)
+            }
+            ArrowError::DictionaryKeyOverflowError => {
+                write!(f, "Dictionary key bigger than the key type")
             }
         }
     }

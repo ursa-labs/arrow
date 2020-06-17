@@ -29,7 +29,7 @@
 #' @rdname DataType
 #' @name DataType
 DataType <- R6Class("DataType",
-  inherit = Object,
+  inherit = ArrowObject,
   public = list(
     ToString = function() {
       DataType__ToString(self)
@@ -70,7 +70,8 @@ DataType <- R6Class("DataType",
         DECIMAL = shared_ptr(Decimal128Type, self$pointer()),
         LIST = shared_ptr(ListType, self$pointer()),
         STRUCT = shared_ptr(StructType, self$pointer()),
-        UNION = stop("Type UNION not implemented yet"),
+        SPARSE_UNION = stop("Type SPARSE_UNION not implemented yet"),
+        DENSE_UNION = stop("Type DENSE_UNION not implemented yet"),
         DICTIONARY = shared_ptr(DictionaryType, self$pointer()),
         MAP = stop("Type MAP not implemented yet")
       )
@@ -140,6 +141,8 @@ Float32 <- R6Class("Float32", inherit = FixedWidthType)
 Float64 <- R6Class("Float64", inherit = FixedWidthType)
 Boolean <- R6Class("Boolean", inherit = FixedWidthType)
 Utf8 <- R6Class("Utf8", inherit = DataType)
+Binary <- R6Class("Binary", inherit = DataType)
+FixedSizeBinary <- R6Class("FixedSizeBinary", inherit = FixedWidthType)
 
 DateType <- R6Class("DateType",
   inherit = FixedWidthType,
@@ -202,6 +205,9 @@ NestedType <- R6Class("NestedType", inherit = DataType)
 #' either "s" or "ms", while `time64()` can be "us" or "ns". `timestamp()` can
 #' take any of those four values.
 #' @param timezone For `timestamp()`, an optional time zone string.
+#' @param byte_width For `binary()`, an optional integer width to create a
+#' `FixedSizeBinary` type. The default `NULL` results in a `BinaryType` with
+#' variable width.
 #' @param precision For `decimal()`, precision
 #' @param scale For `decimal()`, scale
 #' @param type For `list_of()`, a data type to make a list-of-type
@@ -282,6 +288,16 @@ utf8 <- function() shared_ptr(Utf8, Utf8__initialize())
 
 #' @rdname data-type
 #' @export
+binary <- function(byte_width = NULL) {
+  if (is.null(byte_width)) {
+    shared_ptr(Binary, Binary__initialize())
+  } else {
+    shared_ptr(FixedSizeBinary, FixedSizeBinary__initialize(byte_width))
+  }
+}
+
+#' @rdname data-type
+#' @export
 string <- utf8
 
 #' @rdname data-type
@@ -344,17 +360,13 @@ null <- function() shared_ptr(Null, Null__initialize())
 
 #' @rdname data-type
 #' @export
-timestamp <- function(unit = c("s", "ms", "us", "ns"), timezone) {
+timestamp <- function(unit = c("s", "ms", "us", "ns"), timezone = "") {
   if (is.character(unit)) {
     unit <- match.arg(unit)
   }
   unit <- make_valid_time_unit(unit, c(valid_time64_units, valid_time32_units))
-  if (missing(timezone)) {
-    shared_ptr(Timestamp, Timestamp__initialize1(unit))
-  } else {
-    assert_that(is.character(timezone), length(timezone) == 1)
-    shared_ptr(Timestamp, Timestamp__initialize2(unit, timezone))
-  }
+  assert_that(is.string(timezone))
+  shared_ptr(Timestamp, Timestamp__initialize(unit, timezone))
 }
 
 #' @rdname data-type

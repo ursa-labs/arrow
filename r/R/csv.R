@@ -32,7 +32,11 @@
 #' `parse_options`, `convert_options`, or `read_options` arguments, or you can
 #' use [CsvTableReader] directly for lower-level access.
 #'
-#' @inheritParams make_readable_file
+#' @param file A character file name, `raw` vector, or an Arrow input stream.
+#' If a file name, a memory-mapped Arrow [InputStream] will be opened and
+#' closed when finished; compression will be detected from the file extension
+#' and handled automatically. If an input stream is provided, it will be left
+#' open.
 #' @param delim Single character used to separate fields within a record.
 #' @param quote Single character used to quote strings.
 #' @param escape_double Does the file escape quotes by doubling them?
@@ -64,8 +68,8 @@
 #' parsing options provided in other arguments (e.g. `delim`, `quote`, etc.).
 #' @param convert_options see [file reader options][CsvReadOptions]
 #' @param read_options see [file reader options][CsvReadOptions]
-#' @param as_data_frame Should the function return a `data.frame` or an
-#' [arrow::Table][Table]?
+#' @param as_data_frame Should the function return a `data.frame` (default) or
+#' an Arrow [Table]?
 #'
 #' @return A `data.frame`, or a Table if `as_data_frame = FALSE`.
 #' @export
@@ -114,6 +118,10 @@ read_delim_arrow <- function(file,
     convert_options <- readr_to_csv_convert_options(na, quoted_na)
   }
 
+  if (!inherits(file, "InputStream")) {
+    file <- make_readable_file(file)
+    on.exit(file$close())
+  }
   reader <- CsvTableReader$create(
     file,
     read_options = read_options,
@@ -204,7 +212,7 @@ read_tsv_arrow <- function(file,
 #'
 #' @include arrow-package.R
 #' @export
-CsvTableReader <- R6Class("CsvTableReader", inherit = Object,
+CsvTableReader <- R6Class("CsvTableReader", inherit = ArrowObject,
   public = list(
     Read = function() shared_ptr(Table, csv___TableReader__Read(self))
   )
@@ -283,7 +291,7 @@ CsvTableReader$create <- function(file,
 #' options.
 #'
 #' @export
-CsvReadOptions <- R6Class("CsvReadOptions", inherit = Object)
+CsvReadOptions <- R6Class("CsvReadOptions", inherit = ArrowObject)
 CsvReadOptions$create <- function(use_threads = option_use_threads(),
                                   block_size = 1048576L,
                                   skip_rows = 0L,
@@ -317,7 +325,7 @@ readr_to_csv_read_options <- function(skip, col_names) {
 #' @format NULL
 #' @docType class
 #' @export
-CsvParseOptions <- R6Class("CsvParseOptions", inherit = Object)
+CsvParseOptions <- R6Class("CsvParseOptions", inherit = ArrowObject)
 CsvParseOptions$create <- function(delimiter = ",",
                                    quoting = TRUE,
                                    quote_char = '"',
@@ -365,7 +373,7 @@ readr_to_csv_parse_options <- function(delim = ",",
 #' @format NULL
 #' @docType class
 #' @export
-CsvConvertOptions <- R6Class("CsvConvertOptions", inherit = Object)
+CsvConvertOptions <- R6Class("CsvConvertOptions", inherit = ArrowObject)
 CsvConvertOptions$create <- function(check_utf8 = TRUE,
                                      null_values = c("", "NA"),
                                      strings_can_be_null = FALSE) {

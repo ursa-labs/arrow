@@ -59,7 +59,7 @@ garrow_decimal128_finalize(GObject *object)
 {
   auto priv = GARROW_DECIMAL128_GET_PRIVATE(object);
 
-  priv->decimal128 = nullptr;
+  priv->decimal128.~shared_ptr();
 
   G_OBJECT_CLASS(garrow_decimal128_parent_class)->finalize(object);
 }
@@ -86,6 +86,8 @@ garrow_decimal128_set_property(GObject *object,
 static void
 garrow_decimal128_init(GArrowDecimal128 *object)
 {
+  auto priv = GARROW_DECIMAL128_GET_PRIVATE(object);
+  new(&priv->decimal128) std::shared_ptr<arrow::Decimal128>;
 }
 
 static void
@@ -264,9 +266,8 @@ garrow_decimal128_greater_than_or_equal(GArrowDecimal128 *decimal,
 gchar *
 garrow_decimal128_to_string_scale(GArrowDecimal128 *decimal, gint32 scale)
 {
-  auto arrow_decimal = garrow_decimal128_get_raw(decimal);
-  auto string =  arrow_decimal->ToString(scale);
-  return g_strndup(string.data(), string.size());
+  const auto arrow_decimal = garrow_decimal128_get_raw(decimal);
+  return g_strdup(arrow_decimal->ToString(scale).c_str());
 }
 
 /**
@@ -282,9 +283,8 @@ garrow_decimal128_to_string_scale(GArrowDecimal128 *decimal, gint32 scale)
 gchar *
 garrow_decimal128_to_string(GArrowDecimal128 *decimal)
 {
-  auto arrow_decimal = garrow_decimal128_get_raw(decimal);
-  auto string =  arrow_decimal->ToIntegerString();
-  return g_strndup(string.data(), string.size());
+  const auto arrow_decimal = garrow_decimal128_get_raw(decimal);
+  return g_strdup(arrow_decimal->ToIntegerString().c_str());
 }
 
 /**

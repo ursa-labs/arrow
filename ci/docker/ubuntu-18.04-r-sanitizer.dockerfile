@@ -21,11 +21,9 @@ FROM wch1/r-debug:latest
 RUN apt-get update -y -q && \
     apt-get install -y -q --no-install-recommends \
       autoconf \
-      bison \
       ca-certificates \
       ccache \
       cmake \
-      flex \
       g++ \
       gcc \
       git \
@@ -47,7 +45,6 @@ RUN apt-get update -y -q && \
       ninja-build \
       pkg-config \
       rapidjson-dev \
-      thrift-compiler \
       tzdata && \
       locale-gen en_US.UTF-8 && \
       apt-get clean && rm -rf /var/lib/apt/lists*
@@ -56,7 +53,7 @@ RUN apt-get update -y -q && \
 # and use pre-built binaries where possible
 RUN printf "\
     options(Ncpus = parallel::detectCores(), \
-            repos = 'https://demo.rstudiopm.com/all/__linux__/bionic/latest', \
+            repos = 'https://packagemanager.rstudio.com/cran/__linux__/bionic/latest', \
             HTTPUserAgent = sprintf(\
                 'R/%%s R (%%s)', getRversion(), \
                 paste(getRversion(), R.version\$platform, R.version\$arch, R.version\$os)))\n" \

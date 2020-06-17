@@ -22,6 +22,8 @@ using Rcpp::wrap;
 
 #if defined(ARROW_R_WITH_ARROW)
 
+#include <arrow/table.h>
+
 // [[arrow::export]]
 int ChunkedArray__length(const std::shared_ptr<arrow::ChunkedArray>& chunked_array) {
   return chunked_array->length();
@@ -40,6 +42,7 @@ int ChunkedArray__num_chunks(const std::shared_ptr<arrow::ChunkedArray>& chunked
 // [[arrow::export]]
 std::shared_ptr<arrow::Array> ChunkedArray__chunk(
     const std::shared_ptr<arrow::ChunkedArray>& chunked_array, int i) {
+  arrow::r::validate_index(i, chunked_array->num_chunks());
   return chunked_array->chunk(i);
 }
 
@@ -57,12 +60,15 @@ std::shared_ptr<arrow::DataType> ChunkedArray__type(
 // [[arrow::export]]
 std::shared_ptr<arrow::ChunkedArray> ChunkedArray__Slice1(
     const std::shared_ptr<arrow::ChunkedArray>& chunked_array, int offset) {
+  arrow::r::validate_slice_offset(offset, chunked_array->length());
   return chunked_array->Slice(offset);
 }
 
 // [[arrow::export]]
 std::shared_ptr<arrow::ChunkedArray> ChunkedArray__Slice2(
     const std::shared_ptr<arrow::ChunkedArray>& chunked_array, int offset, int length) {
+  arrow::r::validate_slice_offset(offset, chunked_array->length());
+  arrow::r::validate_slice_length(length, chunked_array->length() - offset);
   return chunked_array->Slice(offset, length);
 }
 
@@ -70,14 +76,12 @@ std::shared_ptr<arrow::ChunkedArray> ChunkedArray__Slice2(
 std::shared_ptr<arrow::ChunkedArray> ChunkedArray__View(
     const std::shared_ptr<arrow::ChunkedArray>& array,
     const std::shared_ptr<arrow::DataType>& type) {
-  std::shared_ptr<arrow::ChunkedArray> out;
-  STOP_IF_NOT_OK(array->View(type, &out));
-  return out;
+  return ValueOrStop(array->View(type));
 }
 
 // [[arrow::export]]
 void ChunkedArray__Validate(const std::shared_ptr<arrow::ChunkedArray>& chunked_array) {
-  STOP_IF_NOT_OK(chunked_array->Validate());
+  StopIfNotOk(chunked_array->Validate());
 }
 
 // [[arrow::export]]

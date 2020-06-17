@@ -32,6 +32,8 @@
 namespace arrow {
 namespace internal {
 
+Executor::~Executor() {}
+
 struct ThreadPool::State {
   State() : desired_capacity_(0), please_shutdown_(false), quick_shutdown_(false) {}
 
@@ -226,7 +228,7 @@ void ThreadPool::LaunchWorkersUnlocked(int threads) {
   }
 }
 
-Status ThreadPool::SpawnReal(std::function<void()> task) {
+Status ThreadPool::SpawnReal(TaskHints hints, std::function<void()> task) {
   {
     ProtectAgainstFork();
     std::lock_guard<std::mutex> lock(state_->mutex_);
@@ -243,6 +245,17 @@ Status ThreadPool::SpawnReal(std::function<void()> task) {
 Result<std::shared_ptr<ThreadPool>> ThreadPool::Make(int threads) {
   auto pool = std::shared_ptr<ThreadPool>(new ThreadPool());
   RETURN_NOT_OK(pool->SetCapacity(threads));
+  return pool;
+}
+
+Result<std::shared_ptr<ThreadPool>> ThreadPool::MakeEternal(int threads) {
+  ARROW_ASSIGN_OR_RAISE(auto pool, Make(threads));
+  // On Windows, the ThreadPool destructor may be called after non-main threads
+  // have been killed by the OS, and hang in a condition variable.
+  // On Unix, we want to avoid leak reports by Valgrind.
+#ifdef _WIN32
+  pool->shutdown_on_destroy_ = false;
+#endif
   return pool;
 }
 
@@ -288,15 +301,11 @@ int ThreadPool::DefaultCapacity() {
 
 // Helper for the singleton pattern
 std::shared_ptr<ThreadPool> ThreadPool::MakeCpuThreadPool() {
-  std::shared_ptr<ThreadPool> pool = *ThreadPool::Make(ThreadPool::DefaultCapacity());
-  // On Windows, the global ThreadPool destructor may be called after
-  // non-main threads have been killed by the OS, and hang in a condition
-  // variable.
-  // On Unix, we want to avoid leak reports by Valgrind.
-#ifdef _WIN32
-  pool->shutdown_on_destroy_ = false;
-#endif
-  return pool;
+  auto maybe_pool = ThreadPool::MakeEternal(ThreadPool::DefaultCapacity());
+  if (!maybe_pool.ok()) {
+    maybe_pool.status().Abort("Failed to create global CPU thread pool");
+  }
+  return *std::move(maybe_pool);
 }
 
 ThreadPool* GetCpuThreadPool() {

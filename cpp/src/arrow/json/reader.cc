@@ -108,7 +108,7 @@ class TableReaderImpl : public TableReader,
 
     std::shared_ptr<ChunkedArray> array;
     RETURN_NOT_OK(builder_->Finish(&array));
-    return Table::FromChunkedStructArray(array, out);
+    return Table::FromChunkedStructArray(array).Value(out);
   }
 
  private:
@@ -140,7 +140,8 @@ class TableReaderImpl : public TableReader,
       } else if (completion->size() == 0) {
         straddling = partial;
       } else {
-        RETURN_NOT_OK(ConcatenateBuffers({partial, completion}, pool_, &straddling));
+        ARROW_ASSIGN_OR_RAISE(straddling,
+                              ConcatenateBuffers({partial, completion}, pool_));
       }
       RETURN_NOT_OK(parser->Parse(straddling));
     }
@@ -209,7 +210,7 @@ Status ParseOne(ParseOptions options, std::shared_ptr<Buffer> json,
   for (int i = 0; i < converted->num_fields(); ++i) {
     columns[i] = converted->field(i);
   }
-  *out = RecordBatch::Make(schema(converted->type()->children()), converted->length(),
+  *out = RecordBatch::Make(schema(converted->type()->fields()), converted->length(),
                            std::move(columns));
   return Status::OK();
 }

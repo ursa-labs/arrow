@@ -30,14 +30,20 @@
 #include "arrow/pretty_print.h"
 #include "arrow/record_batch.h"
 #include "arrow/status.h"
+#include "arrow/testing/extension_type.h"
 #include "arrow/testing/gtest_util.h"
 #include "arrow/testing/random.h"
 #include "arrow/testing/util.h"
 #include "arrow/type.h"
 #include "arrow/type_traits.h"
 #include "arrow/util/bit_util.h"
+#include "arrow/util/bitmap_builders.h"
+#include "arrow/util/checked_cast.h"
 
 namespace arrow {
+
+using internal::checked_cast;
+
 namespace ipc {
 namespace test {
 
@@ -103,9 +109,10 @@ static Status MakeListArray(const std::shared_ptr<Array>& child_array, int num_l
     // Force invariants
     const auto child_length = static_cast<offset_type>(child_array->length());
     offsets[0] = 0;
-    std::replace_if(offsets.begin(), offsets.end(),
-                    [child_length](offset_type offset) { return offset > child_length; },
-                    child_length);
+    std::replace_if(
+        offsets.begin(), offsets.end(),
+        [child_length](offset_type offset) { return offset > child_length; },
+        child_length);
   }
 
   offsets[num_lists] = static_cast<offset_type>(child_array->length());
@@ -154,11 +161,11 @@ Status MakeRandomBooleanArray(const int length, bool include_nulls,
                               std::shared_ptr<Array>* out) {
   std::vector<uint8_t> values(length);
   random_null_bytes(length, 0.5, values.data());
-  ARROW_ASSIGN_OR_RAISE(auto data, BitUtil::BytesToBits(values));
+  ARROW_ASSIGN_OR_RAISE(auto data, internal::BytesToBits(values));
 
   if (include_nulls) {
     std::vector<uint8_t> valid_bytes(length);
-    ARROW_ASSIGN_OR_RAISE(auto null_bitmap, BitUtil::BytesToBits(valid_bytes));
+    ARROW_ASSIGN_OR_RAISE(auto null_bitmap, internal::BytesToBits(valid_bytes));
     random_null_bytes(length, 0.1, valid_bytes.data());
     *out = std::make_shared<BooleanArray>(length, data, null_bitmap, -1);
   } else {
@@ -416,7 +423,7 @@ Status MakeStruct(std::shared_ptr<RecordBatch>* out) {
   std::shared_ptr<Array> no_nulls(new StructArray(type, list_batch->num_rows(), columns));
   std::vector<uint8_t> null_bytes(list_batch->num_rows(), 1);
   null_bytes[0] = 0;
-  ARROW_ASSIGN_OR_RAISE(auto null_bitmap, BitUtil::BytesToBits(null_bytes));
+  ARROW_ASSIGN_OR_RAISE(auto null_bitmap, internal::BytesToBits(null_bytes));
   std::shared_ptr<Array> with_nulls(
       new StructArray(type, list_batch->num_rows(), columns, null_bitmap, 1));
 
@@ -428,15 +435,12 @@ Status MakeStruct(std::shared_ptr<RecordBatch>* out) {
 
 Status MakeUnion(std::shared_ptr<RecordBatch>* out) {
   // Define schema
-  std::vector<std::shared_ptr<Field>> union_types(
+  std::vector<std::shared_ptr<Field>> union_fields(
       {field("u0", int32()), field("u1", uint8())});
 
   std::vector<int8_t> type_codes = {5, 10};
-  auto sparse_type =
-      std::make_shared<UnionType>(union_types, type_codes, UnionMode::SPARSE);
-
-  auto dense_type =
-      std::make_shared<UnionType>(union_types, type_codes, UnionMode::DENSE);
+  auto sparse_type = sparse_union(union_fields, type_codes);
+  auto dense_type = dense_union(union_fields, type_codes);
 
   auto f0 = field("sparse_nonnull", sparse_type, false);
   auto f1 = field("sparse", sparse_type);
@@ -473,17 +477,17 @@ Status MakeUnion(std::shared_ptr<RecordBatch>* out) {
 
   std::vector<uint8_t> null_bytes(length, 1);
   null_bytes[2] = 0;
-  ARROW_ASSIGN_OR_RAISE(auto null_bitmap, BitUtil::BytesToBits(null_bytes));
+  ARROW_ASSIGN_OR_RAISE(auto null_bitmap, internal::BytesToBits(null_bytes));
 
   // construct individual nullable/non-nullable struct arrays
-  auto sparse_no_nulls =
-      std::make_shared<UnionArray>(sparse_type, length, sparse_children, type_ids_buffer);
-  auto sparse = std::make_shared<UnionArray>(sparse_type, length, sparse_children,
-                                             type_ids_buffer, NULLPTR, null_bitmap, 1);
+  auto sparse_no_nulls = std::make_shared<SparseUnionArray>(
+      sparse_type, length, sparse_children, type_ids_buffer);
+  auto sparse = std::make_shared<SparseUnionArray>(sparse_type, length, sparse_children,
+                                                   type_ids_buffer, null_bitmap, 1);
 
   auto dense =
-      std::make_shared<UnionArray>(dense_type, length, dense_children, type_ids_buffer,
-                                   offsets_buffer, null_bitmap, 1);
+      std::make_shared<DenseUnionArray>(dense_type, length, dense_children,
+                                        type_ids_buffer, offsets_buffer, null_bitmap, 1);
 
   // construct batch
   std::vector<std::shared_ptr<Array>> arrays = {sparse_no_nulls, sparse, dense};
@@ -580,6 +584,32 @@ Status MakeDictionaryFlat(std::shared_ptr<RecordBatch>* out) {
 
   std::vector<std::shared_ptr<Array>> arrays = {a0, a1, a2};
   *out = RecordBatch::Make(schema, length, arrays);
+  return Status::OK();
+}
+
+Status MakeNestedDictionary(std::shared_ptr<RecordBatch>* out) {
+  const int64_t length = 7;
+
+  auto inner_dict_values = ArrayFromJSON(utf8(), "[\"foo\", \"bar\", \"baz\"]");
+  ARROW_ASSIGN_OR_RAISE(auto inner_dict,
+                        DictionaryArray::FromArrays(
+                            dictionary(int8(), inner_dict_values->type()),
+                            /*indices=*/ArrayFromJSON(int8(), "[0, 1, 2, null, 2, 1, 0]"),
+                            /*dictionary=*/inner_dict_values));
+
+  ARROW_ASSIGN_OR_RAISE(auto outer_dict_values,
+                        ListArray::FromArrays(
+                            /*offsets=*/*ArrayFromJSON(int32(), "[0, 3, 3, 6, 7]"),
+                            /*values=*/*inner_dict));
+  ARROW_ASSIGN_OR_RAISE(
+      auto outer_dict, DictionaryArray::FromArrays(
+                           dictionary(int32(), outer_dict_values->type()),
+                           /*indices=*/ArrayFromJSON(int32(), "[0, 1, 3, 3, null, 3, 2]"),
+                           /*dictionary=*/outer_dict_values));
+  DCHECK_EQ(outer_dict->length(), length);
+
+  auto schema = ::arrow::schema({field("f0", outer_dict->type())});
+  *out = RecordBatch::Make(schema, length, {outer_dict});
   return Status::OK();
 }
 
@@ -716,15 +746,16 @@ Status MakeDecimal(std::shared_ptr<RecordBatch>* out) {
   constexpr int kDecimalSize = 16;
   constexpr int length = 10;
 
-  std::shared_ptr<Buffer> data, is_valid;
   std::vector<uint8_t> is_valid_bytes(length);
 
-  RETURN_NOT_OK(AllocateBuffer(kDecimalSize * length, &data));
+  ARROW_ASSIGN_OR_RAISE(std::shared_ptr<Buffer> data,
+                        AllocateBuffer(kDecimalSize * length));
 
   random_decimals(length, 1, kDecimalPrecision, data->mutable_data());
   random_null_bytes(length, 0.1, is_valid_bytes.data());
 
-  ARROW_ASSIGN_OR_RAISE(is_valid, BitUtil::BytesToBits(is_valid_bytes));
+  ARROW_ASSIGN_OR_RAISE(std::shared_ptr<Buffer> is_valid,
+                        internal::BytesToBits(is_valid_bytes));
 
   auto a1 = std::make_shared<Decimal128Array>(f0->type(), length, data, is_valid,
                                               kUnknownNullCount);
@@ -752,6 +783,46 @@ Status MakeNull(std::shared_ptr<RecordBatch>* out) {
   ArrayFromVector<Int64Type, int64_t>(f1->type(), is_valid, int_values, &a2);
 
   *out = RecordBatch::Make(schema, a1->length(), {a1, a2});
+  return Status::OK();
+}
+
+Status MakeUuid(std::shared_ptr<RecordBatch>* out) {
+  auto uuid_type = uuid();
+  auto storage_type = checked_cast<const ExtensionType&>(*uuid_type).storage_type();
+
+  auto f0 = field("f0", uuid_type);
+  auto f1 = field("f1", uuid_type, /*nullable=*/false);
+  auto schema = ::arrow::schema({f0, f1});
+
+  auto a0 = std::make_shared<UuidArray>(
+      uuid_type, ArrayFromJSON(storage_type, R"(["0123456789abcdef", null])"));
+  auto a1 = std::make_shared<UuidArray>(
+      uuid_type,
+      ArrayFromJSON(storage_type, R"(["ZYXWVUTSRQPONMLK", "JIHGFEDBA9876543"])"));
+
+  *out = RecordBatch::Make(schema, a1->length(), {a0, a1});
+  return Status::OK();
+}
+
+Status MakeDictExtension(std::shared_ptr<RecordBatch>* out) {
+  auto type = dict_extension_type();
+  auto storage_type = checked_cast<const ExtensionType&>(*type).storage_type();
+
+  auto f0 = field("f0", type);
+  auto f1 = field("f1", type, /*nullable=*/false);
+  auto schema = ::arrow::schema({f0, f1});
+
+  auto storage0 = std::make_shared<DictionaryArray>(
+      storage_type, ArrayFromJSON(int8(), "[1, 0, null, 1, 1]"),
+      ArrayFromJSON(utf8(), R"(["foo", "bar"])"));
+  auto a0 = std::make_shared<ExtensionArray>(type, storage0);
+
+  auto storage1 = std::make_shared<DictionaryArray>(
+      storage_type, ArrayFromJSON(int8(), "[2, 0, 0, 1, 1]"),
+      ArrayFromJSON(utf8(), R"(["arrow", "parquet", "plasma"])"));
+  auto a1 = std::make_shared<ExtensionArray>(type, storage1);
+
+  *out = RecordBatch::Make(schema, a1->length(), {a0, a1});
   return Status::OK();
 }
 

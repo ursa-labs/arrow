@@ -39,8 +39,26 @@ test_that("Schema print method", {
   )
 })
 
-test_that("Schema $metadata when there is none", {
-  expect_null(schema(b = double())$metadata)
+test_that("Schema metadata", {
+  s <- schema(b = double())
+  expect_equivalent(s$metadata, list())
+  expect_false(s$HasMetadata)
+  s$metadata <- list(test = TRUE)
+  expect_identical(s$metadata, list(test = "TRUE"))
+  expect_true(s$HasMetadata)
+  s$metadata$foo <- 42
+  expect_identical(s$metadata, list(test = "TRUE", foo = "42"))
+  expect_true(s$HasMetadata)
+  s$metadata$foo <- NULL
+  expect_identical(s$metadata, list(test = "TRUE"))
+  expect_true(s$HasMetadata)
+  s$metadata <- NULL
+  expect_equivalent(s$metadata, list())
+  expect_false(s$HasMetadata)
+  expect_error(
+    s$metadata <- 4,
+    "Key-value metadata must be a named list or character vector"
+  )
 })
 
 test_that("Schema $GetFieldByName", {
@@ -62,7 +80,7 @@ test_that("reading schema from Buffer", {
   expect_is(writer, "RecordBatchStreamWriter")
   writer$close()
 
-  buffer <- stream$getvalue()
+  buffer <- stream$finish()
   expect_is(buffer, "Buffer")
 
   reader <- MessageReader$create(buffer)
@@ -89,7 +107,23 @@ test_that("Input validation when creating a table with a schema", {
 test_that("Schema$Equals", {
   a <- schema(b = double(), c = bool())
   b <- a$WithMetadata(list(some="metadata"))
+
+  # different metadata
   expect_failure(expect_equal(a, b))
+  expect_false(a$Equals(b, check_metadata = TRUE))
+
+  # Metadata not checked
   expect_equivalent(a, b)
+
+  # Non-schema object
   expect_false(a$Equals(42))
+})
+
+test_that("unify_schemas", {
+  a <- schema(b = double(), c = bool())
+  z <- schema(b = double(), k = utf8())
+  expect_equal(
+    unify_schemas(a, z),
+    schema(b = double(), c = bool(), k = utf8())
+  )
 })

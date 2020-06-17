@@ -51,7 +51,10 @@ void AssertUnconvertedArraysEqual(const Array& expected, const Array& actual) {
     }
     case Type::LIST: {
       ASSERT_EQ(expected.type_id(), Type::LIST);
-      AssertBufferEqual(*expected.null_bitmap(), *actual.null_bitmap());
+      ASSERT_EQ(expected.null_count(), actual.null_count());
+      if (expected.null_count() != 0) {
+        AssertBufferEqual(*expected.null_bitmap(), *actual.null_bitmap());
+      }
       const auto& expected_offsets = expected.data()->buffers[1];
       const auto& actual_offsets = actual.data()->buffers[1];
       AssertBufferEqual(*expected_offsets, *actual_offsets);
@@ -72,8 +75,8 @@ void AssertUnconvertedStructArraysEqual(const StructArray& expected,
                                         const StructArray& actual) {
   ASSERT_EQ(expected.num_fields(), actual.num_fields());
   for (int i = 0; i < expected.num_fields(); ++i) {
-    auto expected_name = expected.type()->child(i)->name();
-    auto actual_name = actual.type()->child(i)->name();
+    auto expected_name = expected.type()->field(i)->name();
+    auto actual_name = actual.type()->field(i)->name();
     ASSERT_EQ(expected_name, actual_name);
     AssertUnconvertedArraysEqual(*expected.field(i), *actual.field(i));
   }
@@ -170,10 +173,10 @@ TEST_P(BlockParserTypeError, FailOnDuplicateKeys) {
       testing::StartsWith("JSON parse error: Column(/a) was specified twice in row 0"));
 }
 
-INSTANTIATE_TEST_CASE_P(BlockParserTypeError, BlockParserTypeError,
-                        ::testing::Values(UnexpectedFieldBehavior::Ignore,
-                                          UnexpectedFieldBehavior::Error,
-                                          UnexpectedFieldBehavior::InferType));
+INSTANTIATE_TEST_SUITE_P(BlockParserTypeError, BlockParserTypeError,
+                         ::testing::Values(UnexpectedFieldBehavior::Ignore,
+                                           UnexpectedFieldBehavior::Error,
+                                           UnexpectedFieldBehavior::InferType));
 
 TEST(BlockParserWithSchema, Nested) {
   auto options = ParseOptions::Defaults();

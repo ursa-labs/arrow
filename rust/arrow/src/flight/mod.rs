@@ -20,7 +20,7 @@
 use std::convert::TryFrom;
 use std::sync::Arc;
 
-use flight::FlightData;
+use flight::{FlightData, SchemaResult};
 
 use crate::datatypes::Schema;
 use crate::error::{ArrowError, Result};
@@ -36,6 +36,15 @@ impl From<&RecordBatch> for FlightData {
             app_metadata: vec![],
             data_header: header,
             data_body: body,
+        }
+    }
+}
+
+/// Convert a `Schema` to `SchemaResult` by converting to an IPC message
+impl From<&Schema> for SchemaResult {
+    fn from(schema: &Schema) -> Self {
+        Self {
+            schema: writer::schema_to_bytes(schema),
         }
     }
 }
@@ -59,9 +68,25 @@ impl From<&Schema> for FlightData {
 impl TryFrom<&FlightData> for Schema {
     type Error = ArrowError;
     fn try_from(data: &FlightData) -> Result<Self> {
-        convert::schema_from_bytes(&data.data_header[..]).ok_or(ArrowError::ParseError(
-            "Unable to convert flight data to Arrow schema".to_string(),
-        ))
+        convert::schema_from_bytes(&data.data_header[..]).ok_or_else(|| {
+            ArrowError::ParseError(
+                "Unable to convert flight data to Arrow schema".to_string(),
+            )
+        })
+    }
+}
+
+/// Try convert `SchemaResult` into an Arrow Schema
+///
+/// Returns an error if the `FlightData` header is not a valid IPC schema
+impl TryFrom<&SchemaResult> for Schema {
+    type Error = ArrowError;
+    fn try_from(data: &SchemaResult) -> Result<Self> {
+        convert::schema_from_bytes(&data.schema[..]).ok_or_else(|| {
+            ArrowError::ParseError(
+                "Unable to convert schema result to Arrow schema".to_string(),
+            )
+        })
     }
 }
 
@@ -72,12 +97,18 @@ pub fn flight_data_to_batch(
 ) -> Result<Option<RecordBatch>> {
     // check that the data_header is a record batch message
     let message = crate::ipc::get_root_as_message(&data.data_header[..]);
-    let batch_header = message
-        .header_as_record_batch()
-        .ok_or(ArrowError::ParseError(
+    let dictionaries_by_field = Vec::new();
+    let batch_header = message.header_as_record_batch().ok_or_else(|| {
+        ArrowError::ParseError(
             "Unable to convert flight data header to a record batch".to_string(),
-        ))?;
-    reader::read_record_batch(&data.data_body, batch_header, schema)
+        )
+    })?;
+    reader::read_record_batch(
+        &data.data_body,
+        batch_header,
+        schema,
+        &dictionaries_by_field,
+    )
 }
 
 // TODO: add more explicit conversion that expoess flight descriptor and metadata options

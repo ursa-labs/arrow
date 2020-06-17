@@ -60,7 +60,7 @@ class TestMemoryPool : public ::arrow::TestMemoryPoolBase {
   MemoryPool* memory_pool() override { return Factory::memory_pool(); }
 };
 
-TYPED_TEST_CASE_P(TestMemoryPool);
+TYPED_TEST_SUITE_P(TestMemoryPool);
 
 TYPED_TEST_P(TestMemoryPool, MemoryTracking) { this->TestMemoryTracking(); }
 
@@ -72,17 +72,17 @@ TYPED_TEST_P(TestMemoryPool, OOM) {
 
 TYPED_TEST_P(TestMemoryPool, Reallocate) { this->TestReallocate(); }
 
-REGISTER_TYPED_TEST_CASE_P(TestMemoryPool, MemoryTracking, OOM, Reallocate);
+REGISTER_TYPED_TEST_SUITE_P(TestMemoryPool, MemoryTracking, OOM, Reallocate);
 
-INSTANTIATE_TYPED_TEST_CASE_P(Default, TestMemoryPool, DefaultMemoryPoolFactory);
-INSTANTIATE_TYPED_TEST_CASE_P(System, TestMemoryPool, SystemMemoryPoolFactory);
+INSTANTIATE_TYPED_TEST_SUITE_P(Default, TestMemoryPool, DefaultMemoryPoolFactory);
+INSTANTIATE_TYPED_TEST_SUITE_P(System, TestMemoryPool, SystemMemoryPoolFactory);
 
 #ifdef ARROW_JEMALLOC
-INSTANTIATE_TYPED_TEST_CASE_P(Jemalloc, TestMemoryPool, JemallocMemoryPoolFactory);
+INSTANTIATE_TYPED_TEST_SUITE_P(Jemalloc, TestMemoryPool, JemallocMemoryPoolFactory);
 #endif
 
 #ifdef ARROW_MIMALLOC
-INSTANTIATE_TYPED_TEST_CASE_P(Mimalloc, TestMemoryPool, MimallocMemoryPoolFactory);
+INSTANTIATE_TYPED_TEST_SUITE_P(Mimalloc, TestMemoryPool, MimallocMemoryPoolFactory);
 #endif
 
 // Death tests and valgrind are known to not play well 100% of the time. See
@@ -107,26 +107,27 @@ TEST(DefaultMemoryPoolDeathTest, MaxMemory) {
 #endif  // ARROW_VALGRIND
 
 TEST(LoggingMemoryPool, Logging) {
-  MemoryPool* pool = default_memory_pool();
+  auto pool = MemoryPool::CreateDefault();
 
-  LoggingMemoryPool lp(pool);
+  LoggingMemoryPool lp(pool.get());
 
   uint8_t* data;
-  ASSERT_OK(pool->Allocate(100, &data));
+  ASSERT_OK(lp.Allocate(100, &data));
 
   uint8_t* data2;
-  ASSERT_OK(pool->Allocate(100, &data2));
+  ASSERT_OK(lp.Allocate(100, &data2));
 
-  pool->Free(data, 100);
-  pool->Free(data2, 100);
+  lp.Free(data, 100);
+  lp.Free(data2, 100);
 
+  ASSERT_EQ(200, lp.max_memory());
   ASSERT_EQ(200, pool->max_memory());
 }
 
 TEST(ProxyMemoryPool, Logging) {
-  MemoryPool* pool = default_memory_pool();
+  auto pool = MemoryPool::CreateDefault();
 
-  ProxyMemoryPool pp(pool);
+  ProxyMemoryPool pp(pool.get());
 
   uint8_t* data;
   ASSERT_OK(pool->Allocate(100, &data));

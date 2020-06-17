@@ -92,20 +92,26 @@ set(BUILD_SUPPORT_DIR "${CMAKE_SOURCE_DIR}/build-support")
 set(ARROW_CMAKE_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}")
 set(ARROW_DOC_DIR "share/doc/${PROJECT_NAME}")
 
-set(ARROW_LLVM_VERSION "7.0")
-# TODO: Remove this when we drop LLVM 7 support.
-set(ARROW_LLVM_VERSION_FALLBACK "7.1")
-string(
-  REGEX
-  REPLACE "^([0-9]+)\\.[0-9]+" "\\1" ARROW_LLVM_MAJOR_VERSION "${ARROW_LLVM_VERSION}")
-string(
-  REGEX
-  REPLACE "^[0-9]+\\.([0-9]+)" "\\1" ARROW_LLVM_MINOR_VERSION "${ARROW_LLVM_VERSION}")
+set(ARROW_LLVM_VERSIONS "10" "9" "8" "7")
+list(GET ARROW_LLVM_VERSIONS 0 ARROW_LLVM_VERSION_PRIMARY)
+string(REGEX
+       REPLACE "^([0-9]+)(\\..+)?" "\\1" ARROW_LLVM_VERSION_PRIMARY_MAJOR
+               "${ARROW_LLVM_VERSION_PRIMARY}")
+
+file(READ ${CMAKE_CURRENT_SOURCE_DIR}/../.env ARROW_ENV)
+string(REGEX MATCH "CLANG_TOOLS=[^\n]+" ARROW_ENV_CLANG_TOOLS_VERSION "${ARROW_ENV}")
+string(REGEX
+       REPLACE "^CLANG_TOOLS=" "" ARROW_CLANG_TOOLS_VERSION
+               "${ARROW_ENV_CLANG_TOOLS_VERSION}")
+string(REGEX
+       REPLACE "^([0-9]+)(\\..+)?" "\\1" ARROW_CLANG_TOOLS_VERSION_MAJOR
+               "${ARROW_CLANG_TOOLS_VERSION}")
 
 if(APPLE)
   find_program(BREW_BIN brew)
   if(BREW_BIN)
-    execute_process(COMMAND ${BREW_BIN} --prefix "llvm@${ARROW_LLVM_MAJOR_VERSION}"
+    execute_process(COMMAND ${BREW_BIN} --prefix
+                            "llvm@${ARROW_LLVM_VERSION_PRIMARY_MAJOR}"
                     OUTPUT_VARIABLE LLVM_BREW_PREFIX
                     OUTPUT_STRIP_TRAILING_WHITESPACE)
     if(NOT LLVM_BREW_PREFIX)
@@ -113,19 +119,21 @@ if(APPLE)
                       OUTPUT_VARIABLE LLVM_BREW_PREFIX
                       OUTPUT_STRIP_TRAILING_WHITESPACE)
     endif()
+
+    execute_process(COMMAND ${BREW_BIN} --prefix "llvm@${ARROW_CLANG_TOOLS_VERSION_MAJOR}"
+                    OUTPUT_VARIABLE CLANG_TOOLS_BREW_PREFIX
+                    OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT CLANG_TOOLS_BREW_PREFIX)
+      execute_process(COMMAND ${BREW_BIN} --prefix llvm
+                      OUTPUT_VARIABLE CLANG_TOOLS_BREW_PREFIX
+                      OUTPUT_STRIP_TRAILING_WHITESPACE)
+    endif()
   endif()
 endif()
 
 find_package(ClangTools)
-if("$ENV{CMAKE_EXPORT_COMPILE_COMMANDS}" STREQUAL "1" OR CLANG_TIDY_FOUND)
-  # Generate a Clang compile_commands.json "compilation database" file for use
-  # with various development tools, such as Vim's YouCompleteMe plugin.
-  # See http://clang.llvm.org/docs/JSONCompilationDatabase.html
-  set(CMAKE_EXPORT_COMPILE_COMMANDS 1)
-endif()
-
 find_package(InferTools)
-if("$ENV{CMAKE_EXPORT_COMPILE_COMMANDS}" STREQUAL "1" OR INFER_FOUND)
+if("$ENV{CMAKE_EXPORT_COMPILE_COMMANDS}" STREQUAL "1" OR CLANG_TIDY_FOUND OR INFER_FOUND)
   # Generate a Clang compile_commands.json "compilation database" file for use
   # with various development tools, such as Vim's YouCompleteMe plugin.
   # See http://clang.llvm.org/docs/JSONCompilationDatabase.html
@@ -137,7 +145,19 @@ endif()
 include(DefineOptions)
 
 # Needed for linting targets, etc.
-find_package(PythonInterp)
+if(${CMAKE_VERSION} VERSION_LESS "3.12.0")
+  find_package(PythonInterp)
+else()
+  # Use the first Python installation on PATH, not the newest one
+  set(Python3_FIND_STRATEGY "LOCATION")
+  # On Windows, use registry last, not first
+  set(Python3_FIND_REGISTRY "LAST")
+  # On macOS, use framework last, not first
+  set(Python3_FIND_FRAMEWORK "LAST")
+
+  find_package(Python3)
+  set(PYTHON_EXECUTABLE ${Python3_EXECUTABLE})
+endif()
 
 if(ARROW_USE_CCACHE)
   find_program(CCACHE_FOUND ccache)
@@ -266,6 +286,7 @@ endif()
 
 if(UNIX)
   add_custom_target(iwyu ${BUILD_SUPPORT_DIR}/iwyu/iwyu.sh)
+  add_custom_target(iwyu-all ${BUILD_SUPPORT_DIR}/iwyu/iwyu.sh all)
 endif(UNIX)
 
 #
@@ -284,6 +305,7 @@ if(ARROW_CUDA OR ARROW_FLIGHT OR ARROW_PARQUET OR ARROW_BUILD_TESTS)
 endif()
 
 if(ARROW_DATASET)
+  set(ARROW_COMPUTE ON)
   set(ARROW_FILESYSTEM ON)
 endif()
 
@@ -314,6 +336,12 @@ endif()
 if(ARROW_ORC)
   set(ARROW_WITH_LZ4 ON)
   set(ARROW_WITH_SNAPPY ON)
+  set(ARROW_WITH_ZLIB ON)
+  set(ARROW_WITH_ZSTD ON)
+endif()
+
+# datetime code used by iOS requires zlib support
+if(IOS)
   set(ARROW_WITH_ZLIB ON)
 endif()
 
@@ -359,16 +387,6 @@ endif()
 
 if(ARROW_TEST_MEMCHECK)
   add_definitions(-DARROW_VALGRIND)
-endif()
-
-if(MSVC
-   AND ARROW_USE_CLCACHE
-   AND (("${CMAKE_GENERATOR}" STREQUAL "NMake Makefiles")
-        OR ("${CMAKE_GENERATOR}" STREQUAL "Ninja")))
-  find_program(CLCACHE_FOUND clcache)
-  if(CLCACHE_FOUND)
-    set(CMAKE_CXX_COMPILER ${CLCACHE_FOUND})
-  endif(CLCACHE_FOUND)
 endif()
 
 #
@@ -658,15 +676,15 @@ if(ARROW_WITH_ZLIB)
 endif()
 
 if(ARROW_WITH_ZSTD)
-  list(APPEND ARROW_STATIC_LINK_LIBS ZSTD::zstd)
-  list(APPEND ARROW_STATIC_INSTALL_INTERFACE_LIBS ZSTD::zstd)
+  list(APPEND ARROW_STATIC_LINK_LIBS ${ARROW_ZSTD_LIBZSTD})
+  list(APPEND ARROW_STATIC_INSTALL_INTERFACE_LIBS ${ARROW_ZSTD_LIBZSTD})
 endif()
 
 if(ARROW_ORC)
-  list(APPEND ARROW_LINK_LIBS ${ARROW_PROTOBUF_LIBPROTOBUF} orc::liborc)
-  list(APPEND ARROW_STATIC_LINK_LIBS ${ARROW_PROTOBUF_LIBPROTOBUF} orc::liborc)
-  list(APPEND ARROW_STATIC_INSTALL_INTERFACE_LIBS ${ARROW_PROTOBUF_LIBPROTOBUF}
-              orc::liborc)
+  list(APPEND ARROW_LINK_LIBS orc::liborc ${ARROW_PROTOBUF_LIBPROTOBUF})
+  list(APPEND ARROW_STATIC_LINK_LIBS orc::liborc ${ARROW_PROTOBUF_LIBPROTOBUF})
+  list(APPEND ARROW_STATIC_INSTALL_INTERFACE_LIBS orc::liborc
+              ${ARROW_PROTOBUF_LIBPROTOBUF})
 endif()
 
 if(ARROW_USE_GLOG)
@@ -692,6 +710,12 @@ add_dependencies(arrow_test_dependencies toolchain-tests)
 
 if(ARROW_STATIC_LINK_LIBS)
   add_dependencies(arrow_dependencies ${ARROW_STATIC_LINK_LIBS})
+  if(ARROW_ORC)
+    if(NOT MSVC)
+      list(APPEND ARROW_STATIC_LINK_LIBS ${CMAKE_DL_LIBS})
+      list(APPEND ARROW_STATIC_INSTALL_INTERFACE_LIBS ${CMAKE_DL_LIBS})
+    endif()
+  endif()
 endif()
 
 set(ARROW_SHARED_PRIVATE_LINK_LIBS ${ARROW_STATIC_LINK_LIBS})
@@ -785,7 +809,7 @@ endif()
 
 if(WIN32)
   # Winsock
-  list(APPEND ARROW_SYSTEM_LINK_LIBS "Ws2_32.dll")
+  list(APPEND ARROW_SYSTEM_LINK_LIBS "ws2_32.dll")
 endif()
 
 if(NOT WIN32 AND NOT APPLE)

@@ -46,6 +46,7 @@ namespace arrow {
 
 class ColumnChunkReader;
 class ColumnReader;
+struct SchemaManifest;
 class RowGroupReader;
 
 /// \brief Arrow read adapter class for deserializing Parquet files as Arrow row batches.
@@ -211,6 +212,10 @@ class PARQUET_EXPORT FileReader {
   /// By default only one thread is used.
   virtual void set_use_threads(bool use_threads) = 0;
 
+  virtual const ArrowReaderProperties& properties() const = 0;
+
+  virtual const SchemaManifest& manifest() const = 0;
+
   virtual ~FileReader() = default;
 };
 
@@ -291,21 +296,6 @@ class PARQUET_EXPORT FileReaderBuilder {
 PARQUET_EXPORT
 ::arrow::Status OpenFile(std::shared_ptr<::arrow::io::RandomAccessFile>,
                          ::arrow::MemoryPool* allocator,
-                         std::unique_ptr<FileReader>* reader);
-
-ARROW_DEPRECATED("Deprecated since 0.15.0. Use FileReaderBuilder")
-PARQUET_EXPORT
-::arrow::Status OpenFile(std::shared_ptr<::arrow::io::RandomAccessFile> file,
-                         ::arrow::MemoryPool* allocator,
-                         const ReaderProperties& properties,
-                         std::shared_ptr<FileMetaData> metadata,
-                         std::unique_ptr<FileReader>* reader);
-
-ARROW_DEPRECATED("Deprecated since 0.15.0. Use FileReaderBuilder")
-PARQUET_EXPORT
-::arrow::Status OpenFile(std::shared_ptr<::arrow::io::RandomAccessFile> file,
-                         ::arrow::MemoryPool* allocator,
-                         const ArrowReaderProperties& properties,
                          std::unique_ptr<FileReader>* reader);
 
 /// @}

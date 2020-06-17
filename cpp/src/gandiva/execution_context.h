@@ -15,17 +15,20 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef ERROR_HOLDER_H
-#define ERROR_HOLDER_H
+#pragma once
 
 #include <memory>
 #include <string>
+#include "arrow/util/value_parsing.h"
 #include "gandiva/simple_arena.h"
 
 namespace gandiva {
 
 /// Execution context during llvm evaluation
 class ExecutionContext {
+  using FloatConverter = arrow::internal::StringConverter<arrow::FloatType>;
+  using DoubleConverter = arrow::internal::StringConverter<arrow::DoubleType>;
+
  public:
   explicit ExecutionContext(arrow::MemoryPool* pool = arrow::default_memory_pool())
       : arena_(pool) {}
@@ -47,10 +50,17 @@ class ExecutionContext {
     arena_.Reset();
   }
 
+  bool parse_float(const char* data, int32_t len, float* val) {
+    return FloatConverter::Convert(data, len, val);
+  }
+
+  bool parse_double(const char* data, int32_t len, double* val) {
+    return DoubleConverter::Convert(data, len, val);
+  }
+
  private:
   std::string error_msg_;
   SimpleArena arena_;
 };
 
 }  // namespace gandiva
-#endif  // ERROR_HOLDER_H

@@ -113,12 +113,11 @@ impl ArrayEqual for BooleanArray {
 
         // TODO: we can do this more efficiently if all values are not-null
         for i in 0..self.len() {
-            if self.is_valid(i) {
-                if bit_util::get_bit(values, i + self.offset())
+            if self.is_valid(i)
+                && bit_util::get_bit(values, i + self.offset())
                     != bit_util::get_bit(other_values, i + other.offset())
-                {
-                    return false;
-                }
+            {
+                return false;
             }
         }
 
@@ -139,6 +138,18 @@ impl PartialEq for BooleanArray {
 }
 
 impl PartialEq for StringArray {
+    fn eq(&self, other: &Self) -> bool {
+        self.equals(other)
+    }
+}
+
+impl PartialEq for FixedSizeBinaryArray {
+    fn eq(&self, other: &Self) -> bool {
+        self.equals(other)
+    }
+}
+
+impl PartialEq for BinaryArray {
     fn eq(&self, other: &Self) -> bool {
         self.equals(other)
     }
@@ -213,6 +224,32 @@ impl ArrayEqual for ListArray {
         }
 
         true
+    }
+}
+
+impl<T: ArrowPrimitiveType> ArrayEqual for DictionaryArray<T> {
+    fn equals(&self, other: &dyn Array) -> bool {
+        self.range_equals(other, 0, self.len(), 0)
+    }
+
+    default fn range_equals(
+        &self,
+        other: &dyn Array,
+        start_idx: usize,
+        end_idx: usize,
+        other_start_idx: usize,
+    ) -> bool {
+        assert!(other_start_idx + (end_idx - start_idx) <= other.len());
+        let other = other.as_any().downcast_ref::<DictionaryArray<T>>().unwrap();
+
+        let iter_a = self.keys().take(end_idx).skip(start_idx);
+        let iter_b = other.keys().skip(other_start_idx);
+
+        // For now, all the values must be the same
+        iter_a.eq(iter_b)
+            && self
+                .values()
+                .range_equals(&*other.values(), 0, other.values().len(), 0)
     }
 }
 
@@ -666,6 +703,53 @@ impl ArrayEqual for StructArray {
     }
 }
 
+impl ArrayEqual for UnionArray {
+    fn equals(&self, _other: &dyn Array) -> bool {
+        unimplemented!(
+            "Added to allow UnionArray to implement the Array trait: see ARROW-8576"
+        )
+    }
+
+    fn range_equals(
+        &self,
+        _other: &dyn Array,
+        _start_idx: usize,
+        _end_idx: usize,
+        _other_start_idx: usize,
+    ) -> bool {
+        unimplemented!(
+            "Added to allow UnionArray to implement the Array trait: see ARROW-8576"
+        )
+    }
+}
+
+impl ArrayEqual for NullArray {
+    fn equals(&self, other: &dyn Array) -> bool {
+        if other.data_type() != &DataType::Null {
+            return false;
+        }
+
+        if self.len() != other.len() {
+            return false;
+        }
+        if self.null_count() != other.null_count() {
+            return false;
+        }
+
+        true
+    }
+
+    fn range_equals(
+        &self,
+        _other: &dyn Array,
+        _start_idx: usize,
+        _end_idx: usize,
+        _other_start_idx: usize,
+    ) -> bool {
+        unimplemented!("Range comparison for null array not yet supported")
+    }
+}
+
 // Compare if the common basic fields between the two arrays are equal
 fn base_equal(this: &ArrayDataRef, other: &ArrayDataRef) -> bool {
     if this.data_type() != other.data_type() {
@@ -704,7 +788,7 @@ fn value_offset_equal<T: Array + ListArrayOps>(this: &T, other: &T) -> bool {
     }
 
     // The expensive case
-    for i in 0..this.len() + 1 {
+    for i in 0..=this.len() {
         if this.value_offset_at(i) - this.value_offset_at(0)
             != other.value_offset_at(i) - other.value_offset_at(0)
         {
@@ -735,12 +819,10 @@ impl<T: ArrowPrimitiveType> JsonEqual for PrimitiveArray<T> {
             return false;
         }
 
-        let result = (0..self.len()).all(|i| match json[i] {
+        (0..self.len()).all(|i| match json[i] {
             Value::Null => self.is_null(i),
             v => self.is_valid(i) && Some(v) == self.value(i).into_json_value().as_ref(),
-        });
-
-        result
+        })
     }
 }
 
@@ -768,13 +850,11 @@ impl JsonEqual for ListArray {
             return false;
         }
 
-        let result = (0..self.len()).all(|i| match json[i] {
+        (0..self.len()).all(|i| match json[i] {
             Value::Array(v) => self.is_valid(i) && self.value(i).equals_json_values(v),
             Value::Null => self.is_null(i) || self.value_length(i) == 0,
             _ => false,
-        });
-
-        result
+        })
     }
 }
 
@@ -796,19 +876,47 @@ impl PartialEq<ListArray> for Value {
     }
 }
 
+impl<T: ArrowPrimitiveType> JsonEqual for DictionaryArray<T> {
+    fn equals_json(&self, json: &[&Value]) -> bool {
+        self.keys().zip(json.iter()).all(|aj| match aj {
+            (None, Value::Null) => true,
+            (Some(a), Value::Number(j)) => {
+                a.to_usize().unwrap() as u64 == j.as_u64().unwrap()
+            }
+            _ => false,
+        })
+    }
+}
+
+impl<T: ArrowPrimitiveType> PartialEq<Value> for DictionaryArray<T> {
+    fn eq(&self, json: &Value) -> bool {
+        match json {
+            Value::Array(json_array) => self.equals_json_values(json_array),
+            _ => false,
+        }
+    }
+}
+
+impl<T: ArrowPrimitiveType> PartialEq<DictionaryArray<T>> for Value {
+    fn eq(&self, arrow: &DictionaryArray<T>) -> bool {
+        match self {
+            Value::Array(json_array) => arrow.equals_json_values(json_array),
+            _ => false,
+        }
+    }
+}
+
 impl JsonEqual for FixedSizeListArray {
     fn equals_json(&self, json: &[&Value]) -> bool {
         if self.len() != json.len() {
             return false;
         }
 
-        let result = (0..self.len()).all(|i| match json[i] {
+        (0..self.len()).all(|i| match json[i] {
             Value::Array(v) => self.is_valid(i) && self.value(i).equals_json_values(v),
             Value::Null => self.is_null(i) || self.value_length() == 0,
             _ => false,
-        });
-
-        result
+        })
     }
 }
 
@@ -860,7 +968,7 @@ impl JsonEqual for StructArray {
             }
         }
 
-        return true;
+        true
     }
 }
 
@@ -985,6 +1093,43 @@ impl PartialEq<FixedSizeBinaryArray> for Value {
     fn eq(&self, arrow: &FixedSizeBinaryArray) -> bool {
         match self {
             Value::Array(json_array) => arrow.equals_json_values(&json_array),
+            _ => false,
+        }
+    }
+}
+
+impl JsonEqual for UnionArray {
+    fn equals_json(&self, _json: &[&Value]) -> bool {
+        unimplemented!(
+            "Added to allow UnionArray to implement the Array trait: see ARROW-8547"
+        )
+    }
+}
+
+impl JsonEqual for NullArray {
+    fn equals_json(&self, json: &[&Value]) -> bool {
+        if self.len() != json.len() {
+            return false;
+        }
+
+        // all JSON values must be nulls
+        json.iter().all(|&v| v == &JNull)
+    }
+}
+
+impl PartialEq<NullArray> for Value {
+    fn eq(&self, arrow: &NullArray) -> bool {
+        match self {
+            Value::Array(json_array) => arrow.equals_json_values(&json_array),
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq<Value> for NullArray {
+    fn eq(&self, json: &Value) -> bool {
+        match json {
+            Value::Array(json_array) => self.equals_json_values(&json_array),
             _ => false,
         }
     }
@@ -1341,6 +1486,30 @@ mod tests {
 
         assert!(a.equals(&b));
         assert!(b.equals(&a));
+    }
+
+    #[test]
+    fn test_null_equal() {
+        let a = NullArray::new(12);
+        let b = NullArray::new(12);
+        assert!(a.equals(&b));
+        assert!(b.equals(&a));
+
+        let b = NullArray::new(10);
+        assert!(!a.equals(&b));
+        assert!(!b.equals(&a));
+
+        // Test the case where offset != 0
+
+        let a_slice = a.slice(2, 3);
+        let b_slice = b.slice(1, 3);
+        assert!(a_slice.equals(&*b_slice));
+        assert!(b_slice.equals(&*a_slice));
+
+        let a_slice = a.slice(5, 4);
+        let b_slice = b.slice(3, 3);
+        assert!(!a_slice.equals(&*b_slice));
+        assert!(!b_slice.equals(&*a_slice));
     }
 
     fn create_list_array<'a, U: AsRef<[i32]>, T: AsRef<[Option<U>]>>(
@@ -1991,5 +2160,34 @@ mod tests {
         }
 
         Ok(builder.finish())
+    }
+
+    #[test]
+    fn test_null_json_equal() {
+        // Test equaled array
+        let arrow_array = NullArray::new(4);
+        let json_array: Value = serde_json::from_str(
+            r#"
+            [
+                null, null, null, null
+            ]
+        "#,
+        )
+        .unwrap();
+        assert!(arrow_array.eq(&json_array));
+        assert!(json_array.eq(&arrow_array));
+
+        // Test unequaled array
+        let arrow_array = NullArray::new(2);
+        let json_array: Value = serde_json::from_str(
+            r#"
+            [
+                null, null, null
+            ]
+        "#,
+        )
+        .unwrap();
+        assert!(arrow_array.ne(&json_array));
+        assert!(json_array.ne(&arrow_array));
     }
 }

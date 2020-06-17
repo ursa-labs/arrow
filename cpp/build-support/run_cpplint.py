@@ -38,6 +38,7 @@ _filters = '''
 -readability/alt_tokens
 -build/header_guard
 -build/c++11
+-build/include_what_you_use
 -runtime/references
 -build/include_order
 '''.split()
@@ -74,8 +75,8 @@ if __name__ == "__main__":
 
     exclude_globs = []
     if arguments.exclude_globs:
-        for line in open(arguments.exclude_globs):
-            exclude_globs.append(line.strip())
+        with open(arguments.exclude_globs) as f:
+            exclude_globs.extend(line.strip() for line in f)
 
     linted_filenames = []
     for path in lintutils.get_sources(arguments.source_dir, exclude_globs):

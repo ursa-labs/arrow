@@ -15,16 +15,19 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef ARROW_UTIL_INT_UTIL_H
-#define ARROW_UTIL_INT_UTIL_H
+#pragma once
 
 #include <cstdint>
 #include <limits>
 #include <type_traits>
 
+#include "arrow/status.h"
 #include "arrow/util/visibility.h"
 
 namespace arrow {
+
+struct ArrayData;
+
 namespace internal {
 
 ARROW_EXPORT
@@ -113,7 +116,11 @@ UpcastInt(Integer v) {
   return v;
 }
 
+/// \brief Do vectorized boundschecking of integer-type indices. The indices
+/// must be non-nonnegative and strictly less than the passed upper limit
+/// (which is usually the length of an array that is being indexed-into).
+ARROW_EXPORT
+Status IndexBoundsCheck(const ArrayData& indices, uint64_t upper_limit);
+
 }  // namespace internal
 }  // namespace arrow
-
-#endif  // ARROW_UTIL_INT_UTIL_H

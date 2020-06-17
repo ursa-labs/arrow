@@ -226,7 +226,7 @@ using Decimal128Types =
                      long long, unsigned long long                // NOLINT
                      >;
 
-TYPED_TEST_CASE(Decimal128Test, Decimal128Types);
+TYPED_TEST_SUITE(Decimal128Test, Decimal128Types);
 
 TYPED_TEST(Decimal128Test, ConstructibleFromAnyIntegerType) {
   Decimal128 value(this->value_);
@@ -292,15 +292,15 @@ TEST_P(Decimal128PrintingTest, Print) {
   ASSERT_EQ(expected_string, printed_value);
 }
 
-INSTANTIATE_TEST_CASE_P(Decimal128PrintingTest, Decimal128PrintingTest,
-                        ::testing::Values(std::make_tuple(123, 1, "12.3"),
-                                          std::make_tuple(123, 5, "0.00123"),
-                                          std::make_tuple(123, 10, "1.23E-8"),
-                                          std::make_tuple(123, -1, "1.23E+3"),
-                                          std::make_tuple(-123, -1, "-1.23E+3"),
-                                          std::make_tuple(123, -3, "1.23E+5"),
-                                          std::make_tuple(-123, -3, "-1.23E+5"),
-                                          std::make_tuple(12345, -3, "1.2345E+7")));
+INSTANTIATE_TEST_SUITE_P(Decimal128PrintingTest, Decimal128PrintingTest,
+                         ::testing::Values(std::make_tuple(123, 1, "12.3"),
+                                           std::make_tuple(123, 5, "0.00123"),
+                                           std::make_tuple(123, 10, "1.23E-8"),
+                                           std::make_tuple(123, -1, "1.23E+3"),
+                                           std::make_tuple(-123, -1, "-1.23E+3"),
+                                           std::make_tuple(123, -3, "1.23E+5"),
+                                           std::make_tuple(-123, -3, "-1.23E+5"),
+                                           std::make_tuple(12345, -3, "1.2345E+7")));
 
 class Decimal128ParsingTest
     : public ::testing::TestWithParam<std::tuple<std::string, uint64_t, int32_t>> {};
@@ -317,21 +317,21 @@ TEST_P(Decimal128ParsingTest, Parse) {
   ASSERT_EQ(expected_scale, scale);
 }
 
-INSTANTIATE_TEST_CASE_P(Decimal128ParsingTest, Decimal128ParsingTest,
-                        ::testing::Values(std::make_tuple("12.3", 123ULL, 1),
-                                          std::make_tuple("0.00123", 123ULL, 5),
-                                          std::make_tuple("1.23E-8", 123ULL, 10),
-                                          std::make_tuple("-1.23E-8", -123LL, 10),
-                                          std::make_tuple("1.23E+3", 1230ULL, 0),
-                                          std::make_tuple("-1.23E+3", -1230LL, 0),
-                                          std::make_tuple("1.23E+5", 123000ULL, 0),
-                                          std::make_tuple("1.2345E+7", 12345000ULL, 0),
-                                          std::make_tuple("1.23e-8", 123ULL, 10),
-                                          std::make_tuple("-1.23e-8", -123LL, 10),
-                                          std::make_tuple("1.23e+3", 1230ULL, 0),
-                                          std::make_tuple("-1.23e+3", -1230LL, 0),
-                                          std::make_tuple("1.23e+5", 123000ULL, 0),
-                                          std::make_tuple("1.2345e+7", 12345000ULL, 0)));
+INSTANTIATE_TEST_SUITE_P(Decimal128ParsingTest, Decimal128ParsingTest,
+                         ::testing::Values(std::make_tuple("12.3", 123ULL, 1),
+                                           std::make_tuple("0.00123", 123ULL, 5),
+                                           std::make_tuple("1.23E-8", 123ULL, 10),
+                                           std::make_tuple("-1.23E-8", -123LL, 10),
+                                           std::make_tuple("1.23E+3", 1230ULL, 0),
+                                           std::make_tuple("-1.23E+3", -1230LL, 0),
+                                           std::make_tuple("1.23E+5", 123000ULL, 0),
+                                           std::make_tuple("1.2345E+7", 12345000ULL, 0),
+                                           std::make_tuple("1.23e-8", 123ULL, 10),
+                                           std::make_tuple("-1.23e-8", -123LL, 10),
+                                           std::make_tuple("1.23e+3", 1230ULL, 0),
+                                           std::make_tuple("-1.23e+3", -1230LL, 0),
+                                           std::make_tuple("1.23e+5", 123000ULL, 0),
+                                           std::make_tuple("1.2345e+7", 12345000ULL, 0)));
 
 class Decimal128ParsingTestInvalid : public ::testing::TestWithParam<std::string> {};
 
@@ -340,9 +340,9 @@ TEST_P(Decimal128ParsingTestInvalid, Parse) {
   ASSERT_RAISES(Invalid, Decimal128::FromString(test_string));
 }
 
-INSTANTIATE_TEST_CASE_P(Decimal128ParsingTestInvalid, Decimal128ParsingTestInvalid,
-                        ::testing::Values("0.00123D/3", "1.23eA8", "1.23E+3A",
-                                          "-1.23E--5", "1.2345E+++07"));
+INSTANTIATE_TEST_SUITE_P(Decimal128ParsingTestInvalid, Decimal128ParsingTestInvalid,
+                         ::testing::Values("0.00123D/3", "1.23eA8", "1.23E+3A",
+                                           "-1.23E--5", "1.2345E+++07"));
 
 TEST(Decimal128ParseTest, WithExponentAndNullptrScale) {
   const Decimal128 expected_value(123);
@@ -387,28 +387,36 @@ TEST(Decimal128Test, TestFromBigEndian) {
                         127 /* 01111111 */}) {
     Decimal128 value(start);
     for (int ii = 0; ii < 16; ++ii) {
-      auto little_endian = value.ToBytes();
-      std::reverse(little_endian.begin(), little_endian.end());
+      auto native_endian = value.ToBytes();
+#if ARROW_LITTLE_ENDIAN
+      std::reverse(native_endian.begin(), native_endian.end());
+#endif
       // Limit the number of bytes we are passing to make
       // sure that it works correctly. That's why all of the
       // 'start' values don't have a 1 in the most significant
       // bit place
       ASSERT_OK_AND_EQ(value,
-                       Decimal128::FromBigEndian(little_endian.data() + 15 - ii, ii + 1));
+                       Decimal128::FromBigEndian(native_endian.data() + 15 - ii, ii + 1));
 
-      // Negate it and convert to big endian
+      // Negate it
       auto negated = -value;
-      little_endian = negated.ToBytes();
-      std::reverse(little_endian.begin(), little_endian.end());
+      native_endian = negated.ToBytes();
+#if ARROW_LITTLE_ENDIAN
+      // convert to big endian
+      std::reverse(native_endian.begin(), native_endian.end());
+#endif
       // The sign bit is looked up in the MSB
       ASSERT_OK_AND_EQ(negated,
-                       Decimal128::FromBigEndian(little_endian.data() + 15 - ii, ii + 1));
+                       Decimal128::FromBigEndian(native_endian.data() + 15 - ii, ii + 1));
 
-      // Take the complement and convert to big endian
+      // Take the complement
       auto complement = ~value;
-      little_endian = complement.ToBytes();
-      std::reverse(little_endian.begin(), little_endian.end());
-      ASSERT_OK_AND_EQ(complement, Decimal128::FromBigEndian(little_endian.data(), 16));
+      native_endian = complement.ToBytes();
+#if ARROW_LITTLE_ENDIAN
+      // convert to big endian
+      std::reverse(native_endian.begin(), native_endian.end());
+#endif
+      ASSERT_OK_AND_EQ(complement, Decimal128::FromBigEndian(native_endian.data(), 16));
 
       value <<= 8;
       value += Decimal128(start);
@@ -666,6 +674,28 @@ TEST(Decimal128Test, ReduceScaleAndRound) {
   result = Decimal128("-123750").ReduceScaleBy(2, true);
   ASSERT_OK(result.ToInteger(&out));
   ASSERT_EQ(-1238, out);
+}
+
+TEST(Decimal128Test, FitsInPrecision) {
+  ASSERT_TRUE(Decimal128("0").FitsInPrecision(1));
+  ASSERT_TRUE(Decimal128("9").FitsInPrecision(1));
+  ASSERT_TRUE(Decimal128("-9").FitsInPrecision(1));
+  ASSERT_FALSE(Decimal128("10").FitsInPrecision(1));
+  ASSERT_FALSE(Decimal128("-10").FitsInPrecision(1));
+
+  ASSERT_TRUE(Decimal128("0").FitsInPrecision(2));
+  ASSERT_TRUE(Decimal128("10").FitsInPrecision(2));
+  ASSERT_TRUE(Decimal128("-10").FitsInPrecision(2));
+  ASSERT_TRUE(Decimal128("99").FitsInPrecision(2));
+  ASSERT_TRUE(Decimal128("-99").FitsInPrecision(2));
+  ASSERT_FALSE(Decimal128("100").FitsInPrecision(2));
+  ASSERT_FALSE(Decimal128("-100").FitsInPrecision(2));
+
+  ASSERT_TRUE(Decimal128("99999999999999999999999999999999999999").FitsInPrecision(38));
+  ASSERT_TRUE(Decimal128("-99999999999999999999999999999999999999").FitsInPrecision(38));
+  ASSERT_FALSE(Decimal128("100000000000000000000000000000000000000").FitsInPrecision(38));
+  ASSERT_FALSE(
+      Decimal128("-100000000000000000000000000000000000000").FitsInPrecision(38));
 }
 
 }  // namespace arrow

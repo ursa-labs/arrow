@@ -22,6 +22,7 @@
 
 #include "arrow/io/buffered.h"
 #include "arrow/testing/gtest_util.h"
+#include "arrow/util/bitmap_builders.h"
 
 #include "parquet/column_reader.h"
 #include "parquet/column_writer.h"
@@ -185,6 +186,31 @@ class TestPrimitiveWriter : public PrimitiveTypedTest<TestType> {
           {Encoding::RLE_DICTIONARY, Encoding::PLAIN, Encoding::RLE, Encoding::PLAIN});
       ASSERT_EQ(encodings, expected);
     }
+
+    std::vector<parquet::PageEncodingStats> encoding_stats =
+        this->metadata_encoding_stats();
+    if (this->type_num() == Type::BOOLEAN) {
+      ASSERT_EQ(encoding_stats[0].encoding, Encoding::PLAIN);
+      ASSERT_EQ(encoding_stats[0].page_type, PageType::DATA_PAGE);
+    } else if (version == ParquetVersion::PARQUET_1_0) {
+      std::vector<Encoding::type> expected(
+          {Encoding::PLAIN_DICTIONARY, Encoding::PLAIN, Encoding::PLAIN_DICTIONARY});
+      ASSERT_EQ(encoding_stats[0].encoding, expected[0]);
+      ASSERT_EQ(encoding_stats[0].page_type, PageType::DICTIONARY_PAGE);
+      for (size_t i = 1; i < encoding_stats.size(); i++) {
+        ASSERT_EQ(encoding_stats[i].encoding, expected[i]);
+        ASSERT_EQ(encoding_stats[i].page_type, PageType::DATA_PAGE);
+      }
+    } else {
+      std::vector<Encoding::type> expected(
+          {Encoding::PLAIN, Encoding::PLAIN, Encoding::RLE_DICTIONARY});
+      ASSERT_EQ(encoding_stats[0].encoding, expected[0]);
+      ASSERT_EQ(encoding_stats[0].page_type, PageType::DICTIONARY_PAGE);
+      for (size_t i = 1; i < encoding_stats.size(); i++) {
+        ASSERT_EQ(encoding_stats[i].encoding, expected[i]);
+        ASSERT_EQ(encoding_stats[i].page_type, PageType::DATA_PAGE);
+      }
+    }
   }
 
   void WriteRequiredWithSettings(Encoding::type encoding, Compression::type compression,
@@ -271,6 +297,15 @@ class TestPrimitiveWriter : public PrimitiveTypedTest<TestType> {
     auto metadata_accessor =
         ColumnChunkMetaData::Make(metadata_->contents(), this->descr_);
     return metadata_accessor->encodings();
+  }
+
+  std::vector<parquet::PageEncodingStats> metadata_encoding_stats() {
+    // Metadata accessor must be created lazily.
+    // This is because the ColumnChunkMetaData semantics dictate the metadata object is
+    // complete (no changes to the metadata buffer can be made after instantiation)
+    auto metadata_accessor =
+        ColumnChunkMetaData::Make(metadata_->contents(), this->descr_);
+    return metadata_accessor->encoding_stats();
   }
 
  protected:
@@ -361,7 +396,7 @@ typedef ::testing::Types<Int32Type, Int64Type, Int96Type, FloatType, DoubleType,
                          BooleanType, ByteArrayType, FLBAType>
     TestTypes;
 
-TYPED_TEST_CASE(TestPrimitiveWriter, TestTypes);
+TYPED_TEST_SUITE(TestPrimitiveWriter, TestTypes);
 
 using TestNullValuesWriter = TestPrimitiveWriter<Int32Type>;
 
@@ -713,14 +748,13 @@ TEST(TestColumnWriter, RepeatedListsUpdateSpacedBug) {
   std::vector<int32_t> values = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
 
   // Write the values into uninitialized memory
-  std::shared_ptr<Buffer> values_buffer;
-  ASSERT_OK(::arrow::AllocateBuffer(64, &values_buffer));
+  ASSERT_OK_AND_ASSIGN(auto values_buffer, ::arrow::AllocateBuffer(64));
   memcpy(values_buffer->mutable_data(), values.data(), 13 * sizeof(int32_t));
   auto values_data = reinterpret_cast<const int32_t*>(values_buffer->data());
 
   std::shared_ptr<Buffer> valid_bits;
-  ASSERT_OK_AND_ASSIGN(
-      valid_bits, ::arrow::BitUtil::BytesToBits({1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1}));
+  ASSERT_OK_AND_ASSIGN(valid_bits, ::arrow::internal::BytesToBits(
+                                       {1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1}));
 
   // valgrind will warn about out of bounds access into def_levels_data
   typed_writer->WriteBatchSpaced(14, def_levels.data(), rep_levels.data(),
@@ -730,11 +764,11 @@ TEST(TestColumnWriter, RepeatedListsUpdateSpacedBug) {
 
 void GenerateLevels(int min_repeat_factor, int max_repeat_factor, int max_level,
                     std::vector<int16_t>& input_levels) {
-  // for each repetition count upto max_repeat_factor
+  // for each repetition count up to max_repeat_factor
   for (int repeat = min_repeat_factor; repeat <= max_repeat_factor; repeat++) {
     // repeat count increases by a factor of 2 for every iteration
     int repeat_count = (1 << repeat);
-    // generate levels for repetition count upto the maximum level
+    // generate levels for repetition count up to the maximum level
     int16_t value = 0;
     int bwidth = 0;
     while (value <= max_level) {
@@ -781,7 +815,8 @@ void VerifyDecodingLevels(Encoding::type encoding, int16_t max_level,
   ASSERT_EQ(num_levels, static_cast<int>(output_levels.size()));
 
   // Decode levels and test with multiple decode calls
-  decoder.SetData(encoding, max_level, num_levels, bytes.data());
+  decoder.SetData(encoding, max_level, num_levels, bytes.data(),
+                  static_cast<int32_t>(bytes.size()));
   int decode_count = 4;
   int num_inner_levels = num_levels / decode_count;
   // Try multiple decoding on a single SetData call
@@ -822,7 +857,8 @@ void VerifyDecodingMultipleSetData(Encoding::type encoding, int16_t max_level,
   for (int ct = 0; ct < setdata_count; ct++) {
     int offset = ct * num_levels;
     ASSERT_EQ(num_levels, static_cast<int>(output_levels.size()));
-    decoder.SetData(encoding, max_level, num_levels, bytes[ct].data());
+    decoder.SetData(encoding, max_level, num_levels, bytes[ct].data(),
+                    static_cast<int32_t>(bytes[ct].size()));
     levels_count = decoder.Decode(num_levels, output_levels.data());
     ASSERT_EQ(num_levels, levels_count);
     for (int i = 0; i < num_levels; i++) {
@@ -844,7 +880,7 @@ TEST(TestLevels, TestLevelsDecodeMultipleBitWidth) {
   // for each encoding
   for (int encode = 0; encode < 2; encode++) {
     Encoding::type encoding = encodings[encode];
-    // BIT_PACKED requires a sequence of atleast 8
+    // BIT_PACKED requires a sequence of at least 8
     if (encoding == Encoding::BIT_PACKED) min_repeat_factor = 3;
     // for each maximum bit-width
     for (int bit_width = 1; bit_width <= max_bit_width; bit_width++) {

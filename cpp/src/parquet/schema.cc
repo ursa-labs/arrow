@@ -400,70 +400,18 @@ std::unique_ptr<Node> GroupNode::FromParquet(const void* opaque_element,
   if (element->__isset.logicalType) {
     // updated writer with logical type present
     group_node = std::unique_ptr<GroupNode>(
-        new GroupNode(element->name, FromThrift(element->repetition_type), fields,
+        new GroupNode(element->name, LoadEnumSafe(&element->repetition_type), fields,
                       LogicalType::FromThrift(element->logicalType), field_id));
   } else {
     group_node = std::unique_ptr<GroupNode>(new GroupNode(
-        element->name, FromThrift(element->repetition_type), fields,
-        (element->__isset.converted_type ? FromThrift(element->converted_type)
+        element->name, LoadEnumSafe(&element->repetition_type), fields,
+        (element->__isset.converted_type ? LoadEnumSafe(&element->converted_type)
                                          : ConvertedType::NONE),
         field_id));
   }
 
   return std::unique_ptr<Node>(group_node.release());
 }
-
-namespace {
-
-// If the parquet file is corrupted it is possible the type value decoded
-// will not be in the range of format::Type::type, which is undefined behavior.
-// This method prevents this by loading the value as the underlying type and checking
-// to make sure it is in range.
-template <typename ApiType>
-struct SafeLoader {
-  using ApiTypeEnum = typename ApiType::type;
-  using ApiTypeRawEnum = typename std::underlying_type<ApiTypeEnum>::type;
-
-  template <typename ThriftType>
-  inline static ApiTypeRawEnum LoadRaw(ThriftType* in) {
-    static_assert(
-        sizeof(ApiTypeEnum) >= sizeof(ThriftType),
-        "parquet type should always be the same size of larger then thrift type");
-    typename std::underlying_type<ThriftType>::type raw_value;
-    memcpy(&raw_value, in, sizeof(ThriftType));
-    return static_cast<ApiTypeRawEnum>(raw_value);
-  }
-
-  template <typename ThriftType, bool IsUnsigned = true>
-  inline static ApiTypeEnum LoadChecked(
-      typename std::enable_if<IsUnsigned, ThriftType>::type* in) {
-    auto raw_value = LoadRaw(in);
-    if (ARROW_PREDICT_FALSE(raw_value >=
-                            static_cast<ApiTypeRawEnum>(ApiType::UNDEFINED))) {
-      return ApiType::UNDEFINED;
-    }
-    return FromThrift(static_cast<ThriftType>(raw_value));
-  }
-
-  template <typename ThriftType, bool IsUnsigned = false>
-  inline static ApiTypeEnum LoadChecked(
-      typename std::enable_if<!IsUnsigned, ThriftType>::type* in) {
-    auto raw_value = LoadRaw(in);
-    if (ARROW_PREDICT_FALSE(raw_value >=
-                                static_cast<ApiTypeRawEnum>(ApiType::UNDEFINED) ||
-                            raw_value < 0)) {
-      return ApiType::UNDEFINED;
-    }
-    return FromThrift(static_cast<ThriftType>(raw_value));
-  }
-
-  template <typename ThriftType>
-  inline static ApiTypeEnum Load(ThriftType* in) {
-    return LoadChecked<ThriftType, std::is_unsigned<ApiTypeRawEnum>::value>(in);
-  }
-};
-
-}  // namespace
 
 std::unique_ptr<Node> PrimitiveNode::FromParquet(const void* opaque_element,
                                                  int field_id) {
@@ -477,27 +425,39 @@ std::unique_ptr<Node> PrimitiveNode::FromParquet(const void* opaque_element,
   std::unique_ptr<PrimitiveNode> primitive_node;
   if (element->__isset.logicalType) {
     // updated writer with logical type present
-    primitive_node = std::unique_ptr<PrimitiveNode>(new PrimitiveNode(
-        element->name, SafeLoader<Repetition>::Load(&(element->repetition_type)),
-        LogicalType::FromThrift(element->logicalType),
-        SafeLoader<Type>::Load(&(element->type)), element->type_length, field_id));
+    primitive_node = std::unique_ptr<PrimitiveNode>(
+        new PrimitiveNode(element->name, LoadEnumSafe(&element->repetition_type),
+                          LogicalType::FromThrift(element->logicalType),
+                          LoadEnumSafe(&element->type), element->type_length, field_id));
   } else if (element->__isset.converted_type) {
     // legacy writer with logical type present
     primitive_node = std::unique_ptr<PrimitiveNode>(new PrimitiveNode(
-        element->name, SafeLoader<Repetition>::Load(&(element->repetition_type)),
-        SafeLoader<Type>::Load(&(element->type)),
-        SafeLoader<ConvertedType>::Load(&(element->converted_type)), element->type_length,
-        element->precision, element->scale, field_id));
+        element->name, LoadEnumSafe(&element->repetition_type),
+        LoadEnumSafe(&element->type), LoadEnumSafe(&element->converted_type),
+        element->type_length, element->precision, element->scale, field_id));
   } else {
     // logical type not present
     primitive_node = std::unique_ptr<PrimitiveNode>(new PrimitiveNode(
-        element->name, SafeLoader<Repetition>::Load(&(element->repetition_type)),
-        NoLogicalType::Make(), SafeLoader<Type>::Load(&(element->type)),
-        element->type_length, field_id));
+        element->name, LoadEnumSafe(&element->repetition_type), NoLogicalType::Make(),
+        LoadEnumSafe(&element->type), element->type_length, field_id));
   }
 
   // Return as unique_ptr to the base type
   return std::unique_ptr<Node>(primitive_node.release());
+}
+
+bool GroupNode::HasRepeatedFields() const {
+  for (int i = 0; i < this->field_count(); ++i) {
+    auto field = this->field(i);
+    if (field->repetition() == Repetition::REPEATED) {
+      return true;
+    }
+    if (field->is_group()) {
+      const auto& group = static_cast<const GroupNode&>(*field);
+      return group.HasRepeatedFields();
+    }
+  }
+  return false;
 }
 
 void GroupNode::ToParquet(void* opaque_element) const {
@@ -589,6 +549,9 @@ std::unique_ptr<Node> Unflatten(const format::SchemaElement* elements, int lengt
 }
 
 std::shared_ptr<SchemaDescriptor> FromParquet(const std::vector<SchemaElement>& schema) {
+  if (schema.empty()) {
+    throw ParquetException("Empty file schema (no root)");
+  }
   std::unique_ptr<Node> root = Unflatten(&schema[0], static_cast<int>(schema.size()));
   std::shared_ptr<SchemaDescriptor> descr = std::make_shared<SchemaDescriptor>();
   descr->Init(std::shared_ptr<GroupNode>(static_cast<GroupNode*>(root.release())));
@@ -902,6 +865,10 @@ int SchemaDescriptor::ColumnIndex(const Node& node) const {
 const schema::Node* SchemaDescriptor::GetColumnRoot(int i) const {
   DCHECK(i >= 0 && i < static_cast<int>(leaves_.size()));
   return leaf_to_base_.find(i)->second.get();
+}
+
+bool SchemaDescriptor::HasRepeatedFields() const {
+  return group_node_->HasRepeatedFields();
 }
 
 std::string SchemaDescriptor::ToString() const {

@@ -30,10 +30,12 @@
 #endif
 
 #include "arrow/filesystem/localfs.h"
+#include "arrow/filesystem/path_util.h"
 #include "arrow/filesystem/util_internal.h"
 #include "arrow/io/file.h"
 #include "arrow/util/io_util.h"
 #include "arrow/util/logging.h"
+#include "arrow/util/uri.h"
 #include "arrow/util/windows_fixup.h"
 
 namespace arrow {
@@ -96,24 +98,25 @@ TimePoint ToTimePoint(FILETIME ft) {
   return TimePoint(std::chrono::duration_cast<TimePoint::duration>(ns_count));
 }
 
-FileStats FileInformationToFileStat(const BY_HANDLE_FILE_INFORMATION& info) {
-  FileStats st;
-  if (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-    st.set_type(FileType::Directory);
-    st.set_size(kNoSize);
+FileInfo FileInformationToFileInfo(const BY_HANDLE_FILE_INFORMATION& information) {
+  FileInfo info;
+  if (information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+    info.set_type(FileType::Directory);
+    info.set_size(kNoSize);
   } else {
     // Regular file
-    st.set_type(FileType::File);
-    st.set_size((static_cast<int64_t>(info.nFileSizeHigh) << 32) + info.nFileSizeLow);
+    info.set_type(FileType::File);
+    info.set_size((static_cast<int64_t>(information.nFileSizeHigh) << 32) +
+                  information.nFileSizeLow);
   }
-  st.set_mtime(ToTimePoint(info.ftLastWriteTime));
-  return st;
+  info.set_mtime(ToTimePoint(information.ftLastWriteTime));
+  return info;
 }
 
-Result<FileStats> StatFile(const std::wstring& path) {
+Result<FileInfo> StatFile(const std::wstring& path) {
   HANDLE h;
   std::string bytes_path = NativeToString(path);
-  FileStats st;
+  FileInfo info;
 
   /* Inspired by CPython, see Modules/posixmodule.c */
   h = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, /* desired access */
@@ -126,26 +129,26 @@ Result<FileStats> StatFile(const std::wstring& path) {
   if (h == INVALID_HANDLE_VALUE) {
     DWORD err = GetLastError();
     if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
-      st.set_path(bytes_path);
-      st.set_type(FileType::NonExistent);
-      st.set_mtime(kNoTime);
-      st.set_size(kNoSize);
-      return st;
+      info.set_path(bytes_path);
+      info.set_type(FileType::NotFound);
+      info.set_mtime(kNoTime);
+      info.set_size(kNoSize);
+      return info;
     } else {
       return IOErrorFromWinError(GetLastError(), "Failed querying information for path '",
                                  bytes_path, "'");
     }
   }
-  BY_HANDLE_FILE_INFORMATION info;
-  if (!GetFileInformationByHandle(h, &info)) {
+  BY_HANDLE_FILE_INFORMATION information;
+  if (!GetFileInformationByHandle(h, &information)) {
     CloseHandle(h);
     return IOErrorFromWinError(GetLastError(), "Failed querying information for path '",
                                bytes_path, "'");
   }
   CloseHandle(h);
-  st = FileInformationToFileStat(info);
-  st.set_path(bytes_path);
-  return st;
+  info = FileInformationToFileInfo(information);
+  info.set_path(bytes_path);
+  return info;
 }
 
 #else  // POSIX systems
@@ -156,54 +159,54 @@ TimePoint ToTimePoint(const struct timespec& s) {
   return TimePoint(std::chrono::duration_cast<TimePoint::duration>(ns_count));
 }
 
-FileStats StatToFileStat(const struct stat& s) {
-  FileStats st;
+FileInfo StatToFileInfo(const struct stat& s) {
+  FileInfo info;
   if (S_ISREG(s.st_mode)) {
-    st.set_type(FileType::File);
-    st.set_size(static_cast<int64_t>(s.st_size));
+    info.set_type(FileType::File);
+    info.set_size(static_cast<int64_t>(s.st_size));
   } else if (S_ISDIR(s.st_mode)) {
-    st.set_type(FileType::Directory);
-    st.set_size(kNoSize);
+    info.set_type(FileType::Directory);
+    info.set_size(kNoSize);
   } else {
-    st.set_type(FileType::Unknown);
-    st.set_size(kNoSize);
+    info.set_type(FileType::Unknown);
+    info.set_size(kNoSize);
   }
 #ifdef __APPLE__
   // macOS doesn't use the POSIX-compliant spelling
-  st.set_mtime(ToTimePoint(s.st_mtimespec));
+  info.set_mtime(ToTimePoint(s.st_mtimespec));
 #else
-  st.set_mtime(ToTimePoint(s.st_mtim));
+  info.set_mtime(ToTimePoint(s.st_mtim));
 #endif
-  return st;
+  return info;
 }
 
-Result<FileStats> StatFile(const std::string& path) {
-  FileStats st;
+Result<FileInfo> StatFile(const std::string& path) {
+  FileInfo info;
   struct stat s;
   int r = stat(path.c_str(), &s);
   if (r == -1) {
     if (errno == ENOENT || errno == ENOTDIR || errno == ELOOP) {
-      st.set_type(FileType::NonExistent);
-      st.set_mtime(kNoTime);
-      st.set_size(kNoSize);
+      info.set_type(FileType::NotFound);
+      info.set_mtime(kNoTime);
+      info.set_size(kNoSize);
     } else {
       return IOErrorFromErrno(errno, "Failed stat()ing path '", path, "'");
     }
   } else {
-    st = StatToFileStat(s);
+    info = StatToFileInfo(s);
   }
-  st.set_path(path);
-  return st;
+  info.set_path(path);
+  return info;
 }
 
 #endif
 
 Status StatSelector(const PlatformFilename& dir_fn, const FileSelector& select,
-                    int32_t nesting_depth, std::vector<FileStats>* out) {
+                    int32_t nesting_depth, std::vector<FileInfo>* out) {
   auto result = ListDir(dir_fn);
   if (!result.ok()) {
     auto status = result.status();
-    if (select.allow_non_existent && status.IsIOError()) {
+    if (select.allow_not_found && status.IsIOError()) {
       ARROW_ASSIGN_OR_RAISE(bool exists, FileExists(dir_fn));
       if (!exists) {
         return Status::OK();
@@ -214,12 +217,12 @@ Status StatSelector(const PlatformFilename& dir_fn, const FileSelector& select,
 
   for (const auto& child_fn : *result) {
     PlatformFilename full_fn = dir_fn.Join(child_fn);
-    ARROW_ASSIGN_OR_RAISE(FileStats st, StatFile(full_fn.ToNative()));
-    if (st.type() != FileType::NonExistent) {
-      out->push_back(std::move(st));
+    ARROW_ASSIGN_OR_RAISE(FileInfo info, StatFile(full_fn.ToNative()));
+    if (info.type() != FileType::NotFound) {
+      out->push_back(std::move(info));
     }
     if (nesting_depth < select.max_recursion && select.recursive &&
-        st.type() == FileType::Directory) {
+        info.type() == FileType::Directory) {
       RETURN_NOT_OK(StatSelector(full_fn, select, nesting_depth + 1, out));
     }
   }
@@ -232,6 +235,35 @@ LocalFileSystemOptions LocalFileSystemOptions::Defaults() {
   return LocalFileSystemOptions();
 }
 
+bool LocalFileSystemOptions::Equals(const LocalFileSystemOptions& other) const {
+  return use_mmap == other.use_mmap;
+}
+
+Result<LocalFileSystemOptions> LocalFileSystemOptions::FromUri(
+    const ::arrow::internal::Uri& uri, std::string* out_path) {
+  if (!uri.username().empty() || !uri.password().empty()) {
+    return Status::Invalid("Unsupported username or password in local URI: '",
+                           uri.ToString(), "'");
+  }
+  std::string path;
+  const auto host = uri.host();
+  if (!host.empty()) {
+#ifdef _WIN32
+    std::stringstream ss;
+    ss << "//" << host << "/" << internal::RemoveLeadingSlash(uri.path());
+    *out_path = ss.str();
+#else
+    return Status::Invalid("Unsupported hostname in non-Windows local URI: '",
+                           uri.ToString(), "'");
+#endif
+  } else {
+    *out_path = uri.path();
+  }
+
+  // TODO handle use_mmap option
+  return LocalFileSystemOptions();
+}
+
 LocalFileSystem::LocalFileSystem() : options_(LocalFileSystemOptions::Defaults()) {}
 
 LocalFileSystem::LocalFileSystem(const LocalFileSystemOptions& options)
@@ -239,15 +271,28 @@ LocalFileSystem::LocalFileSystem(const LocalFileSystemOptions& options)
 
 LocalFileSystem::~LocalFileSystem() {}
 
-Result<FileStats> LocalFileSystem::GetTargetStats(const std::string& path) {
+Result<std::string> LocalFileSystem::NormalizePath(std::string path) {
+  ARROW_ASSIGN_OR_RAISE(auto fn, PlatformFilename::FromString(path));
+  return fn.ToString();
+}
+
+bool LocalFileSystem::Equals(const FileSystem& other) const {
+  if (other.type_name() != type_name()) {
+    return false;
+  } else {
+    const auto& localfs = ::arrow::internal::checked_cast<const LocalFileSystem&>(other);
+    return options_.Equals(localfs.options());
+  }
+}
+
+Result<FileInfo> LocalFileSystem::GetFileInfo(const std::string& path) {
   ARROW_ASSIGN_OR_RAISE(auto fn, PlatformFilename::FromString(path));
   return StatFile(fn.ToNative());
 }
 
-Result<std::vector<FileStats>> LocalFileSystem::GetTargetStats(
-    const FileSelector& select) {
+Result<std::vector<FileInfo>> LocalFileSystem::GetFileInfo(const FileSelector& select) {
   ARROW_ASSIGN_OR_RAISE(auto fn, PlatformFilename::FromString(select.base_dir));
-  std::vector<FileStats> results;
+  std::vector<FileInfo> results;
   RETURN_NOT_OK(StatSelector(fn, select, 0, &results));
   return results;
 }
@@ -263,7 +308,7 @@ Status LocalFileSystem::CreateDir(const std::string& path, bool recursive) {
 
 Status LocalFileSystem::DeleteDir(const std::string& path) {
   ARROW_ASSIGN_OR_RAISE(auto fn, PlatformFilename::FromString(path));
-  auto st = ::arrow::internal::DeleteDirTree(fn, /*allow_non_existent=*/false).status();
+  auto st = ::arrow::internal::DeleteDirTree(fn, /*allow_not_found=*/false).status();
   if (!st.ok()) {
     // TODO Status::WithPrefix()?
     std::stringstream ss;
@@ -275,8 +320,7 @@ Status LocalFileSystem::DeleteDir(const std::string& path) {
 
 Status LocalFileSystem::DeleteDirContents(const std::string& path) {
   ARROW_ASSIGN_OR_RAISE(auto fn, PlatformFilename::FromString(path));
-  auto st =
-      ::arrow::internal::DeleteDirContents(fn, /*allow_non_existent=*/false).status();
+  auto st = ::arrow::internal::DeleteDirContents(fn, /*allow_not_found=*/false).status();
   if (!st.ok()) {
     std::stringstream ss;
     ss << "Cannot delete directory contents in '" << path << "': " << st.message();
@@ -287,7 +331,7 @@ Status LocalFileSystem::DeleteDirContents(const std::string& path) {
 
 Status LocalFileSystem::DeleteFile(const std::string& path) {
   ARROW_ASSIGN_OR_RAISE(auto fn, PlatformFilename::FromString(path));
-  return ::arrow::internal::DeleteFile(fn, /*allow_non_existent=*/false).status();
+  return ::arrow::internal::DeleteFile(fn, /*allow_not_found=*/false).status();
 }
 
 Status LocalFileSystem::Move(const std::string& src, const std::string& dest) {

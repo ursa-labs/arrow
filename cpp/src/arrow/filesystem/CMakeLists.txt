@@ -21,9 +21,11 @@ arrow_install_all_headers("arrow/filesystem")
 # pkg-config support
 arrow_add_pkg_config("arrow-filesystem")
 
-add_arrow_test(filesystem_test)
-add_arrow_test(localfs_test)
-add_arrow_test(path_forest_test)
+add_arrow_test(filesystem-test
+               SOURCES
+               filesystem_test.cc
+               localfs_test.cc
+               path_forest_test.cc)
 
 if(ARROW_S3)
   add_arrow_test(s3fs_test)
@@ -33,6 +35,15 @@ if(ARROW_S3)
     target_link_libraries(arrow-s3fs-narrative-test ${ARROW_TEST_LINK_LIBS}
                           ${GFLAGS_LIBRARIES} GTest::gtest)
     add_dependencies(arrow-tests arrow-s3fs-narrative-test)
+  endif()
+
+  if(ARROW_BUILD_BENCHMARKS AND ARROW_PARQUET)
+    add_arrow_benchmark(s3fs_benchmark PREFIX "arrow-filesystem")
+    if(ARROW_TEST_LINKAGE STREQUAL "static")
+      target_link_libraries(arrow-filesystem-s3fs-benchmark PRIVATE parquet_static)
+    else()
+      target_link_libraries(arrow-filesystem-s3fs-benchmark PRIVATE parquet_shared)
+    endif()
   endif()
 endif()
 

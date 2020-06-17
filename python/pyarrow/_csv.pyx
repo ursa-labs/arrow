@@ -20,15 +20,17 @@
 # cython: embedsignature = True
 # cython: language_level = 3
 
+from cython.operator cimport dereference as deref
 
+from collections.abc import Mapping
 from pyarrow.includes.common cimport *
 from pyarrow.includes.libarrow cimport *
-from pyarrow.lib cimport (check_status, Field, MemoryPool, ensure_type,
+from pyarrow.lib cimport (check_status, Field, MemoryPool, Schema,
+                          _CRecordBatchReader, ensure_type,
                           maybe_unbox_memory_pool, get_input_stream,
-                          pyarrow_wrap_table, pyarrow_wrap_data_type,
-                          pyarrow_unwrap_data_type)
-
-from pyarrow.compat import frombytes, tobytes, Mapping
+                          pyarrow_wrap_schema, pyarrow_wrap_table,
+                          pyarrow_wrap_data_type, pyarrow_unwrap_data_type)
+from pyarrow.lib import frombytes, tobytes
 
 
 cdef unsigned char _single_char(s) except 0:
@@ -68,7 +70,7 @@ cdef class ReadOptions:
     # Avoid mistakingly creating attributes
     __slots__ = ()
 
-    def __init__(self, use_threads=None, block_size=None, skip_rows=None,
+    def __init__(self, *, use_threads=None, block_size=None, skip_rows=None,
                  column_names=None, autogenerate_column_names=None):
         self.options = CCSVReadOptions.Defaults()
         if use_threads is not None:
@@ -173,12 +175,9 @@ cdef class ParseOptions:
         If False, an empty line is interpreted as containing a single empty
         value (assuming a one-column CSV file).
     """
-    cdef:
-        CCSVParseOptions options
-
     __slots__ = ()
 
-    def __init__(self, delimiter=None, quote_char=None, double_quote=None,
+    def __init__(self, *, delimiter=None, quote_char=None, double_quote=None,
                  escape_char=None, newlines_in_values=None,
                  ignore_empty_lines=None):
         self.options = CCSVParseOptions.Defaults()
@@ -282,6 +281,48 @@ cdef class ParseOptions:
     def ignore_empty_lines(self, value):
         self.options.ignore_empty_lines = value
 
+    def equals(self, ParseOptions other):
+        return (
+            self.delimiter == other.delimiter and
+            self.quote_char == other.quote_char and
+            self.double_quote == other.double_quote and
+            self.escape_char == other.escape_char and
+            self.newlines_in_values == other.newlines_in_values and
+            self.ignore_empty_lines == other.ignore_empty_lines
+        )
+
+    @staticmethod
+    cdef ParseOptions wrap(CCSVParseOptions options):
+        out = ParseOptions()
+        out.options = options
+        return out
+
+    def __getstate__(self):
+        return (self.delimiter, self.quote_char, self.double_quote,
+                self.escape_char, self.newlines_in_values,
+                self.ignore_empty_lines)
+
+    def __setstate__(self, state):
+        (self.delimiter, self.quote_char, self.double_quote,
+         self.escape_char, self.newlines_in_values,
+         self.ignore_empty_lines) = state
+
+
+cdef class _ISO8601:
+    """
+    A special object indicating ISO-8601 parsing.
+    """
+    __slots__ = ()
+
+    def __str__(self):
+        return 'ISO8601'
+
+    def __eq__(self, other):
+        return isinstance(other, _ISO8601)
+
+
+ISO8601 = _ISO8601()
+
 
 cdef class ConvertOptions:
     """
@@ -305,6 +346,11 @@ cdef class ConvertOptions:
     false_values: list, optional
         A sequence of strings that denote false booleans in the data
         (defaults are appropriate in most cases).
+    timestamp_parsers: list, optional
+        A sequence of strptime()-compatible format strings, tried in order
+        when attempting to infer or convert timestamp values (the special
+        value ISO8601() can also be given).  By default, a fast built-in
+        ISO-8601 parser is used.
     strings_can_be_null: bool, optional (default False)
         Whether string / binary columns can have null values.
         If true, then strings in null_values are considered null for
@@ -340,11 +386,11 @@ cdef class ConvertOptions:
     # Avoid mistakingly creating attributes
     __slots__ = ()
 
-    def __init__(self, check_utf8=None, column_types=None, null_values=None,
+    def __init__(self, *, check_utf8=None, column_types=None, null_values=None,
                  true_values=None, false_values=None,
                  strings_can_be_null=None, include_columns=None,
                  include_missing_columns=None, auto_dict_encode=None,
-                 auto_dict_max_cardinality=None):
+                 auto_dict_max_cardinality=None, timestamp_parsers=None):
         self.options = CCSVConvertOptions.Defaults()
         if check_utf8 is not None:
             self.check_utf8 = check_utf8
@@ -366,6 +412,8 @@ cdef class ConvertOptions:
             self.auto_dict_encode = auto_dict_encode
         if auto_dict_max_cardinality is not None:
             self.auto_dict_max_cardinality = auto_dict_max_cardinality
+        if timestamp_parsers is not None:
+            self.timestamp_parsers = timestamp_parsers
 
     @property
     def check_utf8(self):
@@ -507,6 +555,44 @@ cdef class ConvertOptions:
     def include_missing_columns(self, value):
         self.options.include_missing_columns = value
 
+    @property
+    def timestamp_parsers(self):
+        """
+        A sequence of strptime()-compatible format strings, tried in order
+        when attempting to infer or convert timestamp values (the special
+        value ISO8601() can also be given).  By default, a fast built-in
+        ISO-8601 parser is used.
+        """
+        cdef:
+            shared_ptr[CTimestampParser] c_parser
+            c_string kind
+
+        parsers = []
+        for c_parser in self.options.timestamp_parsers:
+            kind = deref(c_parser).kind()
+            if kind == b'strptime':
+                parsers.append(frombytes(deref(c_parser).format()))
+            else:
+                assert kind == b'iso8601'
+                parsers.append(ISO8601)
+
+        return parsers
+
+    @timestamp_parsers.setter
+    def timestamp_parsers(self, value):
+        cdef:
+            vector[shared_ptr[CTimestampParser]] c_parsers
+
+        for v in value:
+            if isinstance(v, str):
+                c_parsers.push_back(CTimestampParser.MakeStrptime(tobytes(v)))
+            elif v == ISO8601:
+                c_parsers.push_back(CTimestampParser.MakeISO8601())
+            else:
+                raise TypeError("Expected list of str or ISO8601 objects")
+
+        self.options.timestamp_parsers = move(c_parsers)
+
 
 cdef _get_reader(input_file, shared_ptr[CInputStream]* out):
     use_memory_map = False
@@ -535,10 +621,45 @@ cdef _get_convert_options(ConvertOptions convert_options,
         out[0] = convert_options.options
 
 
+cdef class CSVStreamingReader(_CRecordBatchReader):
+    """An object that reads record batches incrementally from a CSV file.
+
+    Should not be instantiated directly by user code.
+    """
+    cdef readonly:
+        Schema schema
+
+    def __init__(self):
+        raise TypeError("Do not call {}'s constructor directly, "
+                        "use pyarrow.csv.open_csv() instead."
+                        .format(self.__class__.__name__))
+
+    cdef _open(self, shared_ptr[CInputStream] stream,
+               CCSVReadOptions c_read_options,
+               CCSVParseOptions c_parse_options,
+               CCSVConvertOptions c_convert_options,
+               CMemoryPool* c_memory_pool):
+        cdef:
+            shared_ptr[CSchema] c_schema
+
+        with nogil:
+            self.reader = <shared_ptr[CRecordBatchReader]> GetResultValue(
+                CCSVStreamingReader.Make(
+                    c_memory_pool, stream,
+                    move(c_read_options), move(c_parse_options),
+                    move(c_convert_options)))
+            c_schema = self.reader.get().schema()
+
+        self.schema = pyarrow_wrap_schema(c_schema)
+
+
 def read_csv(input_file, read_options=None, parse_options=None,
              convert_options=None, MemoryPool memory_pool=None):
     """
     Read a Table from a stream of CSV data.
+
+    The input CSV data should be encoded in UTF8.  Non-UTF8 data can still
+    be read and converted as Binary columns.
 
     Parameters
     ----------
@@ -584,3 +705,54 @@ def read_csv(input_file, read_options=None, parse_options=None,
         table = GetResultValue(reader.get().Read())
 
     return pyarrow_wrap_table(table)
+
+
+def open_csv(input_file, read_options=None, parse_options=None,
+             convert_options=None, MemoryPool memory_pool=None):
+    """
+    Open a streaming reader of CSV data.
+
+    The input CSV data should be encoded in UTF8.  Non-UTF8 data can still
+    be read and converted as Binary columns.
+
+    Reading using this function is always single-threaded.
+
+    Parameters
+    ----------
+    input_file: string, path or file-like object
+        The location of CSV data.  If a string or path, and if it ends
+        with a recognized compressed file extension (e.g. ".gz" or ".bz2"),
+        the data is automatically decompressed when reading.
+    read_options: pyarrow.csv.ReadOptions, optional
+        Options for the CSV reader (see pyarrow.csv.ReadOptions constructor
+        for defaults)
+    parse_options: pyarrow.csv.ParseOptions, optional
+        Options for the CSV parser
+        (see pyarrow.csv.ParseOptions constructor for defaults)
+    convert_options: pyarrow.csv.ConvertOptions, optional
+        Options for converting CSV data
+        (see pyarrow.csv.ConvertOptions constructor for defaults)
+    memory_pool: MemoryPool, optional
+        Pool to allocate Table memory from
+
+    Returns
+    -------
+    :class:`pyarrow.csv.CSVStreamingReader`
+    """
+    cdef:
+        shared_ptr[CInputStream] stream
+        CCSVReadOptions c_read_options
+        CCSVParseOptions c_parse_options
+        CCSVConvertOptions c_convert_options
+        CSVStreamingReader reader
+
+    _get_reader(input_file, &stream)
+    _get_read_options(read_options, &c_read_options)
+    _get_parse_options(parse_options, &c_parse_options)
+    _get_convert_options(convert_options, &c_convert_options)
+
+    reader = CSVStreamingReader.__new__(CSVStreamingReader)
+    reader._open(stream, move(c_read_options), move(c_parse_options),
+                 move(c_convert_options),
+                 maybe_unbox_memory_pool(memory_pool))
+    return reader

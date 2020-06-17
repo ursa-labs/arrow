@@ -92,8 +92,7 @@ void ClearBucket(int argc, char** argv) {
 
 void TestBucket(int argc, char** argv) {
   auto fs = MakeFileSystem();
-  FileStats st;
-  std::vector<FileStats> stats;
+  std::vector<FileInfo> infos;
   FileSelector select;
   std::shared_ptr<io::InputStream> is;
   std::shared_ptr<io::RandomAccessFile> file;
@@ -102,55 +101,55 @@ void TestBucket(int argc, char** argv) {
 
   // Check bucket exists and is empty
   select.base_dir = "";
-  select.allow_non_existent = false;
+  select.allow_not_found = false;
   select.recursive = false;
-  ASSERT_OK_AND_ASSIGN(stats, fs->GetTargetStats(select));
-  ASSERT_EQ(stats.size(), 0) << "Bucket should be empty, perhaps use --clear?";
+  ASSERT_OK_AND_ASSIGN(infos, fs->GetFileInfo(select));
+  ASSERT_EQ(infos.size(), 0) << "Bucket should be empty, perhaps use --clear?";
 
   // Create directory structure
   ASSERT_OK(fs->CreateDir("EmptyDir", /*recursive=*/false));
   ASSERT_OK(fs->CreateDir("Dir1", /*recursive=*/false));
   ASSERT_OK(fs->CreateDir("Dir1/Subdir", /*recursive=*/false));
-  ASSERT_RAISES_PRINT("CreateDir in non-existing parent", IOError,
+  ASSERT_RAISES_PRINT("CreateDir in nonexistent parent", IOError,
                       fs->CreateDir("Dir2/Subdir", /*recursive=*/false));
   ASSERT_OK(fs->CreateDir("Dir2/Subdir", /*recursive=*/true));
   CreateFile(fs.get(), "File1", "first data");
   CreateFile(fs.get(), "Dir1/File2", "second data");
   CreateFile(fs.get(), "Dir2/Subdir/File3", "third data");
 
-  // GetTargetStats(Selector)
+  // GetFileInfo(Selector)
   select.base_dir = "";
-  ASSERT_OK_AND_ASSIGN(stats, fs->GetTargetStats(select));
-  ASSERT_EQ(stats.size(), 4);
-  SortStats(&stats);
-  AssertFileStats(stats[0], "Dir1", FileType::Directory);
-  AssertFileStats(stats[1], "Dir2", FileType::Directory);
-  AssertFileStats(stats[2], "EmptyDir", FileType::Directory);
-  AssertFileStats(stats[3], "File1", FileType::File, 10);
+  ASSERT_OK_AND_ASSIGN(infos, fs->GetFileInfo(select));
+  ASSERT_EQ(infos.size(), 4);
+  SortInfos(&infos);
+  AssertFileInfo(infos[0], "Dir1", FileType::Directory);
+  AssertFileInfo(infos[1], "Dir2", FileType::Directory);
+  AssertFileInfo(infos[2], "EmptyDir", FileType::Directory);
+  AssertFileInfo(infos[3], "File1", FileType::File, 10);
 
   select.base_dir = "zzzz";
-  ASSERT_RAISES_PRINT("GetTargetStats(Selector) with non-existing base_dir", IOError,
-                      fs->GetTargetStats(select));
-  select.allow_non_existent = true;
-  ASSERT_OK_AND_ASSIGN(stats, fs->GetTargetStats(select));
-  ASSERT_EQ(stats.size(), 0);
+  ASSERT_RAISES_PRINT("GetFileInfo(Selector) with nonexisting base_dir", IOError,
+                      fs->GetFileInfo(select));
+  select.allow_not_found = true;
+  ASSERT_OK_AND_ASSIGN(infos, fs->GetFileInfo(select));
+  ASSERT_EQ(infos.size(), 0);
 
   select.base_dir = "Dir1";
-  select.allow_non_existent = false;
-  ASSERT_OK_AND_ASSIGN(stats, fs->GetTargetStats(select));
-  ASSERT_EQ(stats.size(), 2);
-  AssertFileStats(stats[0], "Dir1/File2", FileType::File, 11);
-  AssertFileStats(stats[1], "Dir1/Subdir", FileType::Directory);
+  select.allow_not_found = false;
+  ASSERT_OK_AND_ASSIGN(infos, fs->GetFileInfo(select));
+  ASSERT_EQ(infos.size(), 2);
+  AssertFileInfo(infos[0], "Dir1/File2", FileType::File, 11);
+  AssertFileInfo(infos[1], "Dir1/Subdir", FileType::Directory);
 
   select.base_dir = "Dir2";
   select.recursive = true;
-  ASSERT_OK_AND_ASSIGN(stats, fs->GetTargetStats(select));
-  ASSERT_EQ(stats.size(), 2);
-  AssertFileStats(stats[0], "Dir2/Subdir", FileType::Directory);
-  AssertFileStats(stats[1], "Dir2/Subdir/File3", FileType::File, 10);
+  ASSERT_OK_AND_ASSIGN(infos, fs->GetFileInfo(select));
+  ASSERT_EQ(infos.size(), 2);
+  AssertFileInfo(infos[0], "Dir2/Subdir", FileType::Directory);
+  AssertFileInfo(infos[1], "Dir2/Subdir/File3", FileType::File, 10);
 
   // Read a file
-  ASSERT_RAISES_PRINT("OpenInputStream with non-existing file", IOError,
+  ASSERT_RAISES_PRINT("OpenInputStream with nonexistent file", IOError,
                       fs->OpenInputStream("zzz"));
   ASSERT_OK_AND_ASSIGN(is, fs->OpenInputStream("File1"));
   ASSERT_OK_AND_ASSIGN(buf, is->Read(5));
@@ -174,24 +173,24 @@ void TestBucket(int argc, char** argv) {
 
   // Copy a file
   ASSERT_OK(fs->CopyFile("File1", "Dir2/File4"));
-  AssertFileStats(fs.get(), "File1", FileType::File, 10);
-  AssertFileStats(fs.get(), "Dir2/File4", FileType::File, 10);
+  AssertFileInfo(fs.get(), "File1", FileType::File, 10);
+  AssertFileInfo(fs.get(), "Dir2/File4", FileType::File, 10);
   AssertFileContents(fs.get(), "Dir2/File4", "first data");
 
   // Copy a file over itself
   ASSERT_OK(fs->CopyFile("File1", "File1"));
-  AssertFileStats(fs.get(), "File1", FileType::File, 10);
+  AssertFileInfo(fs.get(), "File1", FileType::File, 10);
   AssertFileContents(fs.get(), "File1", "first data");
 
   // Move a file
   ASSERT_OK(fs->Move("Dir2/File4", "File5"));
-  AssertFileStats(fs.get(), "Dir2/File4", FileType::NonExistent);
-  AssertFileStats(fs.get(), "File5", FileType::File, 10);
+  AssertFileInfo(fs.get(), "Dir2/File4", FileType::NotFound);
+  AssertFileInfo(fs.get(), "File5", FileType::File, 10);
   AssertFileContents(fs.get(), "File5", "first data");
 
   // Move a file over itself
   ASSERT_OK(fs->Move("File5", "File5"));
-  AssertFileStats(fs.get(), "File5", FileType::File, 10);
+  AssertFileInfo(fs.get(), "File5", FileType::File, 10);
   AssertFileContents(fs.get(), "File5", "first data");
 }
 

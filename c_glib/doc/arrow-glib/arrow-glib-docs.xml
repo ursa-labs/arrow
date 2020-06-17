@@ -91,6 +91,18 @@
     </chapter>
   </part>
 
+  <part id="file-system-api">
+    <title>File system API</title>
+    <chapter id="file-system">
+      <title>File system</title>
+      <xi:include href="xml/file-system.xml"/>
+    </chapter>
+    <chapter id="local-file-system">
+      <title>Local file system</title>
+      <xi:include href="xml/local-file-system.xml"/>
+    </chapter>
+  </part>
+
   <part id="io">
     <title>IO</title>
     <chapter id="mode">
@@ -119,6 +131,10 @@
     <chapter id="metadata">
       <title>Metadata</title>
       <xi:include href="xml/metadata-version.xml"/>
+    </chapter>
+    <chapter id="ipc-options">
+      <title>Options</title>
+      <xi:include href="xml/ipc-options.xml"/>
     </chapter>
     <chapter id="reader">
       <title>Reader</title>
@@ -162,6 +178,14 @@
   <index id="api-index-1-0-0" role="1.0.0">
     <title>Index of new symbols in 1.0.0</title>
     <xi:include href="xml/api-index-1.0.0.xml"><xi:fallback /></xi:include>
+  </index>
+  <index id="api-index-0-17-0" role="0.17.0">
+    <title>Index of new symbols in 0.17.0</title>
+    <xi:include href="xml/api-index-0.17.0.xml"><xi:fallback /></xi:include>
+  </index>
+  <index id="api-index-0-16-0" role="0.16.0">
+    <title>Index of new symbols in 0.16.0</title>
+    <xi:include href="xml/api-index-0.16.0.xml"><xi:fallback /></xi:include>
   </index>
   <index id="api-index-0-15-0" role="0.15.0">
     <title>Index of new symbols in 0.15.0</title>

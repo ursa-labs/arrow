@@ -17,16 +17,14 @@
 
 package org.apache.arrow.memory;
 
-import static org.apache.arrow.memory.BaseAllocator.indent;
-
 import java.util.IdentityHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
+import org.apache.arrow.memory.util.CommonUtil;
 import org.apache.arrow.memory.util.HistoricalLog;
 import org.apache.arrow.util.Preconditions;
 
-import io.netty.buffer.ArrowBuf;
 import io.netty.buffer.UnsafeDirectLittleEndian;
 
 /**
@@ -233,8 +231,8 @@ public class BufferLedger implements ValueWithKeyIncluded<BaseAllocator>, Refere
             this,
             null,
             length, // length (in bytes) in the underlying memory chunk for this new ArrowBuf
-            derivedBufferAddress, // starting byte address in the underlying memory for this new ArrowBuf,
-            false);
+            derivedBufferAddress // starting byte address in the underlying memory for this new ArrowBuf
+            );
 
     // logging
     if (BaseAllocator.DEBUG) {
@@ -272,7 +270,7 @@ public class BufferLedger implements ValueWithKeyIncluded<BaseAllocator>, Refere
     final long startAddress = allocationManager.memoryAddress();
 
     // create ArrowBuf
-    final ArrowBuf buf = new ArrowBuf(this, manager, length, startAddress, false);
+    final ArrowBuf buf = new ArrowBuf(this, manager, length, startAddress);
 
     // logging
     if (BaseAllocator.DEBUG) {
@@ -309,9 +307,6 @@ public class BufferLedger implements ValueWithKeyIncluded<BaseAllocator>, Refere
    */
   @Override
   public ArrowBuf retain(final ArrowBuf srcBuffer, BufferAllocator target) {
-    if (srcBuffer.isEmpty()) {
-      return srcBuffer;
-    }
 
     if (BaseAllocator.DEBUG) {
       historicalLog.recordEvent("retain(%s)", target.getName());
@@ -324,7 +319,7 @@ public class BufferLedger implements ValueWithKeyIncluded<BaseAllocator>, Refere
     // alternatively, if there was already a mapping for <buffer allocator, ref manager> in
     // allocation manager, the ref count of the new buffer will be targetrefmanager.refcount() + 1
     // and this will be true for all the existing buffers currently managed by targetrefmanager
-    final BufferLedger targetRefManager = allocationManager.associate((BaseAllocator)target);
+    final BufferLedger targetRefManager = allocationManager.associate((BaseAllocator) target);
     // create a new ArrowBuf to associate with new allocator and target ref manager
     final long targetBufLength = srcBuffer.capacity();
     ArrowBuf targetArrowBuf = targetRefManager.deriveBuffer(srcBuffer, 0, targetBufLength);
@@ -343,7 +338,7 @@ public class BufferLedger implements ValueWithKeyIncluded<BaseAllocator>, Refere
   boolean transferBalance(final ReferenceManager targetReferenceManager) {
     Preconditions.checkArgument(targetReferenceManager != null,
         "Expecting valid target reference manager");
-    final BaseAllocator targetAllocator = (BaseAllocator)targetReferenceManager.getAllocator();
+    final BaseAllocator targetAllocator = (BaseAllocator) targetReferenceManager.getAllocator();
     Preconditions.checkArgument(allocator.root == targetAllocator.root,
         "You can only transfer between two allocators that share the same root.");
 
@@ -376,7 +371,7 @@ public class BufferLedger implements ValueWithKeyIncluded<BaseAllocator>, Refere
       // since the transfer can only happen from the owning reference manager,
       // we need to set the target ref manager as the new owning ref manager
       // for the chunk of memory in allocation manager
-      allocationManager.setOwningLedger((BufferLedger)targetReferenceManager);
+      allocationManager.setOwningLedger((BufferLedger) targetReferenceManager);
       return overlimit;
     }
   }
@@ -411,9 +406,6 @@ public class BufferLedger implements ValueWithKeyIncluded<BaseAllocator>, Refere
    */
   @Override
   public TransferResult transferOwnership(final ArrowBuf srcBuffer, final BufferAllocator target) {
-    if (srcBuffer.isEmpty()) {
-      return new TransferResult(true, srcBuffer);
-    }
     // the call to associate will return the corresponding reference manager (buffer ledger) for
     // the target allocator. if the allocation manager didn't already have a mapping
     // for the target allocator, it will create one and return the new reference manager with a
@@ -421,7 +413,7 @@ public class BufferLedger implements ValueWithKeyIncluded<BaseAllocator>, Refere
     // alternatively, if there was already a mapping for <buffer allocator, ref manager> in
     // allocation manager, the ref count of the new buffer will be targetrefmanager.refcount() + 1
     // and this will be true for all the existing buffers currently managed by targetrefmanager
-    final BufferLedger targetRefManager = allocationManager.associate((BaseAllocator)target);
+    final BufferLedger targetRefManager = allocationManager.associate((BaseAllocator) target);
     // create a new ArrowBuf to associate with new allocator and target ref manager
     final long targetBufLength = srcBuffer.capacity();
     final ArrowBuf targetArrowBuf = targetRefManager.deriveBuffer(srcBuffer, 0, targetBufLength);
@@ -492,7 +484,7 @@ public class BufferLedger implements ValueWithKeyIncluded<BaseAllocator>, Refere
    * @param verbosity The level of verbosity to print.
    */
   void print(StringBuilder sb, int indent, BaseAllocator.Verbosity verbosity) {
-    indent(sb, indent)
+    CommonUtil.indent(sb, indent)
       .append("ledger[")
       .append(ledgerId)
       .append("] allocator: ")
@@ -526,7 +518,7 @@ public class BufferLedger implements ValueWithKeyIncluded<BaseAllocator>, Refere
   /**
    * Returns the underlying {@link UnsafeDirectLittleEndian} instance used by this BufferLedger.
    *
-   * @deprecated Use #unwrap(UnsafeDirectLittleEndian.class) instead.
+   * @deprecated This method may be removed in a future release.
    */
   @Deprecated
   public UnsafeDirectLittleEndian getUnderlying() {
@@ -552,12 +544,6 @@ public class BufferLedger implements ValueWithKeyIncluded<BaseAllocator>, Refere
   public <T> T unwrap(Class<T> clazz) {
     if (clazz.isInstance(allocationManager)) {
       return clazz.cast(allocationManager);
-    }
-
-    if (clazz == UnsafeDirectLittleEndian.class) {
-      Preconditions.checkState(allocationManager instanceof NettyAllocationManager,
-          "Underlying memory was not allocated by Netty");
-      return clazz.cast(((NettyAllocationManager) allocationManager).getMemoryChunk());
     }
 
     throw new IllegalArgumentException("Unexpected unwrapping class: " + clazz);

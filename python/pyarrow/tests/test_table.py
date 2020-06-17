@@ -16,13 +16,13 @@
 # under the License.
 
 from collections import OrderedDict
+from collections.abc import Iterable
 import pickle
 import sys
 
 import numpy as np
 import pytest
 import pyarrow as pa
-from pyarrow import compat
 
 
 def test_chunked_array_basics():
@@ -30,6 +30,9 @@ def test_chunked_array_basics():
     assert data.type == pa.string()
     assert data.to_pylist() == []
     data.validate()
+
+    data2 = pa.chunked_array([], type='binary')
+    assert data2.type == pa.binary()
 
     with pytest.raises(ValueError):
         pa.chunked_array([])
@@ -110,7 +113,7 @@ def test_chunked_array_iter():
     for i, j in zip(range(10), arr):
         assert i == j
 
-    assert isinstance(arr, compat.Iterable)
+    assert isinstance(arr, Iterable)
 
 
 def test_chunked_array_equals():
@@ -125,8 +128,6 @@ def test_chunked_array_equals():
             y = pa.chunked_array(yarrs)
         assert x.equals(y)
         assert y.equals(x)
-        assert x == y
-        assert x != str(y)
 
     def ne(xarrs, yarrs):
         if isinstance(xarrs, pa.ChunkedArray):
@@ -139,7 +140,6 @@ def test_chunked_array_equals():
             y = pa.chunked_array(yarrs)
         assert not x.equals(y)
         assert not y.equals(x)
-        assert x != y
 
     eq(pa.chunked_array([], type=pa.int32()),
        pa.chunked_array([], type=pa.int32()))
@@ -286,7 +286,7 @@ def test_chunked_array_flatten():
 def test_recordbatch_basics():
     data = [
         pa.array(range(5), type='int16'),
-        pa.array([-10, -5, 0, 5, 10], type='int32')
+        pa.array([-10, -5, 0, None, 10], type='int32')
     ]
 
     batch = pa.record_batch(data, ['c0', 'c1'])
@@ -295,12 +295,13 @@ def test_recordbatch_basics():
     assert len(batch) == 5
     assert batch.num_rows == 5
     assert batch.num_columns == len(data)
-    assert batch.nbytes == 5 * 2 + 1 + 5 * 4 + 1
+    # (only the second array has a null bitmap)
+    assert batch.nbytes == (5 * 2) + (5 * 4 + 1)
     assert sys.getsizeof(batch) >= object.__sizeof__(batch) + batch.nbytes
     pydict = batch.to_pydict()
     assert pydict == OrderedDict([
         ('c0', [0, 1, 2, 3, 4]),
-        ('c1', [-10, -5, 0, 5, 10])
+        ('c1', [-10, -5, 0, None, 10])
     ])
     if sys.version_info >= (3, 7):
         assert type(pydict) == dict
@@ -312,7 +313,8 @@ def test_recordbatch_basics():
         batch[2]
 
     # Schema passed explicitly
-    schema = pa.schema([pa.field('c0', pa.int16()),
+    schema = pa.schema([pa.field('c0', pa.int16(),
+                                 metadata={'key': 'value'}),
                         pa.field('c1', pa.int32())],
                        metadata={b'foo': b'bar'})
     batch = pa.record_batch(data, schema=schema)
@@ -320,6 +322,57 @@ def test_recordbatch_basics():
     # schema as first positional argument
     batch = pa.record_batch(data, schema)
     assert batch.schema == schema
+    assert str(batch) == """pyarrow.RecordBatch
+c0: int16
+c1: int32"""
+
+    assert batch.to_string(show_metadata=True) == """\
+pyarrow.RecordBatch
+c0: int16
+  -- field metadata --
+  key: 'value'
+c1: int32
+-- schema metadata --
+foo: 'bar'"""
+
+
+def test_recordbatch_equals():
+    data1 = [
+        pa.array(range(5), type='int16'),
+        pa.array([-10, -5, 0, None, 10], type='int32')
+    ]
+    data2 = [
+        pa.array(['a', 'b', 'c']),
+        pa.array([['d'], ['e'], ['f']]),
+    ]
+    column_names = ['c0', 'c1']
+
+    batch = pa.record_batch(data1, column_names)
+    assert batch == pa.record_batch(data1, column_names)
+    assert batch.equals(pa.record_batch(data1, column_names))
+
+    assert batch != pa.record_batch(data2, column_names)
+    assert not batch.equals(pa.record_batch(data2, column_names))
+
+    batch_meta = pa.record_batch(data1, names=column_names,
+                                 metadata={'key': 'value'})
+    assert batch_meta.equals(batch)
+    assert not batch_meta.equals(batch, check_metadata=True)
+
+    # ARROW-8889
+    assert not batch.equals(None)
+    assert batch != "foo"
+
+
+def test_recordbatch_take():
+    batch = pa.record_batch(
+        [pa.array([1, 2, 3, None, 5]),
+         pa.array(['a', 'b', 'c', 'd', 'e'])],
+        ['f1', 'f2'])
+    assert batch.take(pa.array([2, 3])).equals(batch.slice(2, 2))
+    assert batch.take(pa.array([2, None])).equals(
+        pa.record_batch([pa.array([3, None]), pa.array(['c', None])],
+                        ['f1', 'f2']))
 
 
 def test_recordbatch_column_sets_private_name():
@@ -456,6 +509,17 @@ def test_table_slice_getitem():
     return _table_like_slice_tests(pa.table)
 
 
+@pytest.mark.pandas
+def test_slice_zero_length_table():
+    # ARROW-7907: a segfault on this code was fixed after 0.16.0
+    table = pa.table({'a': pa.array([], type=pa.timestamp('us'))})
+    table_slice = table.slice(0, 0)
+    table_slice.to_pandas()
+
+    table = pa.table({'a': pa.chunked_array([], type=pa.string())})
+    table.to_pandas()
+
+
 def test_recordbatchlist_schema_equals():
     a1 = np.array([1], dtype='uint32')
     a2 = np.array([4.0, 5.0], dtype='float64')
@@ -480,8 +544,8 @@ def test_table_equals():
     assert not table.equals(None)
 
     other = pa.Table.from_arrays([], names=[], metadata={'key': 'value'})
-    assert not table.equals(other)
-    assert table.equals(other, check_metadata=False)
+    assert not table.equals(other, check_metadata=True)
+    assert table.equals(other)
 
 
 def test_table_from_batches_and_schema():
@@ -548,7 +612,7 @@ def test_table_basics():
     assert table.num_rows == 5
     assert table.num_columns == 2
     assert table.shape == (5, 2)
-    assert table.nbytes == 2 * (5 * 8 + 1)
+    assert table.nbytes == 2 * (5 * 8)
     assert sys.getsizeof(table) >= object.__sizeof__(table) + table.nbytes
     pydict = table.to_pydict()
     assert pydict == OrderedDict([
@@ -667,7 +731,8 @@ def test_table_select_column():
 
     assert table.column('a').equals(table.column(0))
 
-    with pytest.raises(KeyError):
+    with pytest.raises(KeyError,
+                       match='Field "d" does not exist in table schema'):
         table.column('d')
 
     with pytest.raises(TypeError):
@@ -675,6 +740,17 @@ def test_table_select_column():
 
     with pytest.raises(IndexError):
         table.column(4)
+
+
+def test_table_column_with_duplicates():
+    # ARROW-8209
+    table = pa.table([pa.array([1, 2, 3]),
+                      pa.array([4, 5, 6]),
+                      pa.array([7, 8, 9])], names=['a', 'b', 'a'])
+
+    with pytest.raises(KeyError,
+                       match='Field "a" exists 2 times in table schema'):
+        table.column('a')
 
 
 def test_table_add_column():
@@ -856,12 +932,12 @@ def test_concat_tables_with_different_schema_metadata():
 
     table1 = pa.Table.from_pandas(df1, schema=schema, preserve_index=False)
     table2 = pa.Table.from_pandas(df2, schema=schema, preserve_index=False)
-    assert table1.schema.equals(table2.schema, check_metadata=False)
+    assert table1.schema.equals(table2.schema)
     assert not table1.schema.equals(table2.schema, check_metadata=True)
 
     table3 = pa.concat_tables([table1, table2])
     assert table1.schema.equals(table3.schema, check_metadata=True)
-    assert table2.schema.equals(table3.schema, check_metadata=False)
+    assert table2.schema.equals(table3.schema)
 
 
 def test_concat_tables_with_promotion():
@@ -1263,6 +1339,29 @@ def test_factory_functions_invalid_input():
         pa.record_batch("invalid input")
 
 
+def test_table_repr_to_string():
+    # Schema passed explicitly
+    schema = pa.schema([pa.field('c0', pa.int16(),
+                                 metadata={'key': 'value'}),
+                        pa.field('c1', pa.int32())],
+                       metadata={b'foo': b'bar'})
+
+    tab = pa.table([pa.array([1, 2, 3, 4], type='int16'),
+                    pa.array([1, 2, 3, 4], type='int32')], schema=schema)
+    assert str(tab) == """pyarrow.Table
+c0: int16
+c1: int32"""
+
+    assert tab.to_string(show_metadata=True) == """\
+pyarrow.Table
+c0: int16
+  -- field metadata --
+  key: 'value'
+c1: int32
+-- schema metadata --
+foo: 'bar'"""
+
+
 def test_table_function_unicode_schema():
     col_a = "äääh"
     col_b = "öööf"
@@ -1275,3 +1374,40 @@ def test_table_function_unicode_schema():
     result = pa.table(d, schema=schema)
     assert result[0].chunk(0).equals(pa.array([1, 2, 3], type='int32'))
     assert result[1].chunk(0).equals(pa.array(['a', 'b', 'c'], type='string'))
+
+
+def test_table_take_vanilla_functionality():
+    table = pa.table(
+        [pa.array([1, 2, 3, None, 5]),
+         pa.array(['a', 'b', 'c', 'd', 'e'])],
+        ['f1', 'f2'])
+
+    assert table.take(pa.array([2, 3])).equals(table.slice(2, 2))
+
+
+def test_table_take_null_index():
+    table = pa.table(
+        [pa.array([1, 2, 3, None, 5]),
+         pa.array(['a', 'b', 'c', 'd', 'e'])],
+        ['f1', 'f2'])
+
+    result_with_null_index = pa.table(
+        [pa.array([1, None]),
+         pa.array(['a', None])],
+        ['f1', 'f2'])
+
+    assert table.take(pa.array([0, None])).equals(result_with_null_index)
+
+
+def test_table_take_non_consecutive():
+    table = pa.table(
+        [pa.array([1, 2, 3, None, 5]),
+         pa.array(['a', 'b', 'c', 'd', 'e'])],
+        ['f1', 'f2'])
+
+    result_non_consecutive = pa.table(
+        [pa.array([2, None]),
+         pa.array(['b', 'd'])],
+        ['f1', 'f2'])
+
+    assert table.take(pa.array([1, 3])).equals(result_non_consecutive)

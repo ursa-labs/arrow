@@ -301,14 +301,14 @@ void CpuInfo::Init() {
 
 #ifdef __APPLE__
   // On Mac OS X use sysctl() to get the cache sizes
-  size_t len = 0;
-  sysctlbyname("hw.cachesize", NULL, &len, NULL, 0);
-  uint64_t* data = static_cast<uint64_t*>(malloc(len));
-  sysctlbyname("hw.cachesize", data, &len, NULL, 0);
-  DCHECK_GE(len / sizeof(uint64_t), 3);
-  for (size_t i = 0; i < 3; ++i) {
-    cache_sizes_[i] = data[i];
-  }
+  size_t len = sizeof(int64_t);
+  int64_t data[1];
+  sysctlbyname("hw.l1dcachesize", data, &len, NULL, 0);
+  cache_sizes_[0] = data[0];
+  sysctlbyname("hw.l2cachesize", data, &len, NULL, 0);
+  cache_sizes_[1] = data[0];
+  sysctlbyname("hw.l3cachesize", data, &len, NULL, 0);
+  cache_sizes_[2] = data[0];
 #elif _WIN32
   if (!RetrieveCacheSize(cache_sizes_)) {
     SetDefaultCacheSize();
@@ -341,7 +341,7 @@ void CpuInfo::VerifyCpuRequirements() {
     DCHECK(false) << "CPU does not support the Supplemental SSE3 instruction set";
   }
 #endif
-#if defined(__aarch64__)
+#if defined(ARROW_HAVE_NEON)
   if (!IsSupported(CpuInfo::ASIMD)) {
     DCHECK(false) << "CPU does not support the Armv8 Neon instruction set";
   }
@@ -349,7 +349,7 @@ void CpuInfo::VerifyCpuRequirements() {
 }
 
 bool CpuInfo::CanUseSSE4_2() const {
-#if defined(ARROW_HAVE_SSE4_2) && defined(ARROW_USE_SIMD)
+#if defined(ARROW_HAVE_SSE4_2)
   return IsSupported(CpuInfo::SSE4_2);
 #else
   return false;
@@ -377,7 +377,7 @@ int CpuInfo::num_cores() { return num_cores_; }
 std::string CpuInfo::model_name() { return model_name_; }
 
 void CpuInfo::SetDefaultCacheSize() {
-#ifdef _SC_LEVEL1_DCACHE_SIZE
+#if defined(_SC_LEVEL1_DCACHE_SIZE) && !defined(__aarch64__)
   // Call sysconf to query for the cache sizes
   cache_sizes_[0] = sysconf(_SC_LEVEL1_DCACHE_SIZE);
   cache_sizes_[1] = sysconf(_SC_LEVEL2_CACHE_SIZE);

@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-import io.netty.buffer.ArrowBuf;
+import org.apache.arrow.memory.ArrowBuf;
 import org.apache.arrow.vector.complex.writer.DecimalWriter;
 import org.apache.arrow.vector.holders.DecimalHolder;
 
@@ -178,6 +178,16 @@ public class UnionListWriter extends AbstractFieldWriter {
     writer.setPosition(writer.idx()+1);
   }
 
+  @Override
+  public void writeNull() {
+    writer.writeNull();
+  }
+
+  public void writeDecimal(int start, ArrowBuf buffer, ArrowType arrowType) {
+    writer.writeDecimal(start, buffer, arrowType);
+    writer.setPosition(writer.idx()+1);
+  }
+
   public void writeDecimal(int start, ArrowBuf buffer) {
     writer.writeDecimal(start, buffer);
     writer.setPosition(writer.idx()+1);
@@ -186,6 +196,11 @@ public class UnionListWriter extends AbstractFieldWriter {
   public void writeDecimal(BigDecimal value) {
     writer.writeDecimal(value);
     writer.setPosition(writer.idx()+1);
+  }
+
+  public void writeBigEndianBytesToDecimal(byte[] value, ArrowType arrowType){
+    writer.writeBigEndianBytesToDecimal(value, arrowType);
+    writer.setPosition(writer.idx() + 1);
   }
 
   <#list vv.types as type>

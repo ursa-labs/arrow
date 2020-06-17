@@ -26,6 +26,7 @@
 #undef Realloc
 #undef Free
 #else
+#include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>  // IWYU pragma: keep
 #endif
@@ -39,6 +40,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <utility>
 
 // ----------------------------------------------------------------------
 // Other Arrow includes
@@ -50,10 +52,14 @@
 #include "arrow/buffer.h"
 #include "arrow/memory_pool.h"
 #include "arrow/status.h"
+#include "arrow/util/future.h"
 #include "arrow/util/io_util.h"
 #include "arrow/util/logging.h"
 
 namespace arrow {
+
+using internal::IOErrorFromErrno;
+
 namespace io {
 
 class OSFile {
@@ -145,7 +151,7 @@ class OSFile {
 
   Result<int64_t> ReadAt(int64_t position, int64_t nbytes, void* out) {
     RETURN_NOT_OK(CheckClosed());
-    RETURN_NOT_OK(internal::ValidateRegion(position, nbytes));
+    RETURN_NOT_OK(internal::ValidateRange(position, nbytes));
     // ReadAt() leaves the file position undefined, so require that we seek
     // before calling Read() or Write().
     need_seeking_.store(true);
@@ -238,20 +244,18 @@ class ReadableFile::ReadableFileImpl : public OSFile {
   Status Open(int fd) { return OpenReadable(fd); }
 
   Result<std::shared_ptr<Buffer>> ReadBuffer(int64_t nbytes) {
-    std::shared_ptr<ResizableBuffer> buffer;
-    RETURN_NOT_OK(AllocateResizableBuffer(pool_, nbytes, &buffer));
+    ARROW_ASSIGN_OR_RAISE(auto buffer, AllocateResizableBuffer(nbytes, pool_));
 
     ARROW_ASSIGN_OR_RAISE(int64_t bytes_read, Read(nbytes, buffer->mutable_data()));
     if (bytes_read < nbytes) {
       RETURN_NOT_OK(buffer->Resize(bytes_read));
       buffer->ZeroPadding();
     }
-    return buffer;
+    return std::move(buffer);
   }
 
   Result<std::shared_ptr<Buffer>> ReadBufferAt(int64_t position, int64_t nbytes) {
-    std::shared_ptr<ResizableBuffer> buffer;
-    RETURN_NOT_OK(AllocateResizableBuffer(pool_, nbytes, &buffer));
+    ARROW_ASSIGN_OR_RAISE(auto buffer, AllocateResizableBuffer(nbytes, pool_));
 
     ARROW_ASSIGN_OR_RAISE(int64_t bytes_read,
                           ReadAt(position, nbytes, buffer->mutable_data()));
@@ -259,7 +263,28 @@ class ReadableFile::ReadableFileImpl : public OSFile {
       RETURN_NOT_OK(buffer->Resize(bytes_read));
       buffer->ZeroPadding();
     }
-    return buffer;
+    return std::move(buffer);
+  }
+
+  Status WillNeed(const std::vector<ReadRange>& ranges) {
+    RETURN_NOT_OK(CheckClosed());
+    for (const auto& range : ranges) {
+      RETURN_NOT_OK(internal::ValidateRange(range.offset, range.length));
+#if defined(POSIX_FADV_WILLNEED)
+      if (posix_fadvise(fd_, range.offset, range.length, POSIX_FADV_WILLNEED)) {
+        return IOErrorFromErrno(errno, "posix_fadvise failed");
+      }
+#elif defined(F_RDADVISE)  // macOS, BSD?
+      struct {
+        off_t ra_offset;
+        int ra_count;
+      } radvisory{range.offset, static_cast<int>(range.length)};
+      if (radvisory.ra_count > 0 && fcntl(fd_, F_RDADVISE, &radvisory) == -1) {
+        return IOErrorFromErrno(errno, "fcntl(fd, F_RDADVISE, ...) failed");
+      }
+#endif
+    }
+    return Status::OK();
   }
 
  private:
@@ -283,26 +308,13 @@ Result<std::shared_ptr<ReadableFile>> ReadableFile::Open(int fd, MemoryPool* poo
   return file;
 }
 
-Status ReadableFile::Open(const std::string& path, std::shared_ptr<ReadableFile>* file) {
-  return Open(path).Value(file);
-}
-
-Status ReadableFile::Open(const std::string& path, MemoryPool* pool,
-                          std::shared_ptr<ReadableFile>* file) {
-  return Open(path, pool).Value(file);
-}
-
-Status ReadableFile::Open(int fd, std::shared_ptr<ReadableFile>* file) {
-  return Open(fd).Value(file);
-}
-
-Status ReadableFile::Open(int fd, MemoryPool* pool, std::shared_ptr<ReadableFile>* file) {
-  return Open(fd, pool).Value(file);
-}
-
 Status ReadableFile::DoClose() { return impl_->Close(); }
 
 bool ReadableFile::closed() const { return !impl_->is_open(); }
+
+Status ReadableFile::WillNeed(const std::vector<ReadRange>& ranges) {
+  return impl_->WillNeed(ranges);
+}
 
 Result<int64_t> ReadableFile::DoTell() const { return impl_->Tell(); }
 
@@ -355,34 +367,6 @@ Result<std::shared_ptr<FileOutputStream>> FileOutputStream::Open(int fd) {
   auto stream = std::shared_ptr<FileOutputStream>(new FileOutputStream());
   RETURN_NOT_OK(stream->impl_->Open(fd));
   return stream;
-}
-
-Status FileOutputStream::Open(const std::string& path,
-                              std::shared_ptr<OutputStream>* out) {
-  return Open(path, false).Value(out);
-}
-
-Status FileOutputStream::Open(const std::string& path, bool append,
-                              std::shared_ptr<OutputStream>* out) {
-  return Open(path, append).Value(out);
-}
-
-Status FileOutputStream::Open(int fd, std::shared_ptr<OutputStream>* out) {
-  return Open(fd).Value(out);
-}
-
-Status FileOutputStream::Open(const std::string& path,
-                              std::shared_ptr<FileOutputStream>* out) {
-  return Open(path, false).Value(out);
-}
-
-Status FileOutputStream::Open(const std::string& path, bool append,
-                              std::shared_ptr<FileOutputStream>* out) {
-  return Open(path, append).Value(out);
-}
-
-Status FileOutputStream::Open(int fd, std::shared_ptr<FileOutputStream>* out) {
-  return Open(fd).Value(out);
 }
 
 Status FileOutputStream::Close() { return impl_->Close(); }
@@ -630,11 +614,6 @@ Result<std::shared_ptr<MemoryMappedFile>> MemoryMappedFile::Create(
   return MemoryMappedFile::Open(path, FileMode::READWRITE);
 }
 
-Status MemoryMappedFile::Create(const std::string& path, int64_t size,
-                                std::shared_ptr<MemoryMappedFile>* out) {
-  return Create(path, size).Value(out);
-}
-
 Result<std::shared_ptr<MemoryMappedFile>> MemoryMappedFile::Open(const std::string& path,
                                                                  FileMode::type mode) {
   std::shared_ptr<MemoryMappedFile> result(new MemoryMappedFile());
@@ -653,17 +632,6 @@ Result<std::shared_ptr<MemoryMappedFile>> MemoryMappedFile::Open(const std::stri
   result->memory_map_.reset(new MemoryMap());
   RETURN_NOT_OK(result->memory_map_->Open(path, mode, offset, length));
   return result;
-}
-
-Status MemoryMappedFile::Open(const std::string& path, FileMode::type mode,
-                              std::shared_ptr<MemoryMappedFile>* out) {
-  return Open(path, mode).Value(out);
-}
-
-Status MemoryMappedFile::Open(const std::string& path, FileMode::type mode,
-                              const int64_t offset, const int64_t length,
-                              std::shared_ptr<MemoryMappedFile>* out) {
-  return Open(path, mode, offset, length).Value(out);
 }
 
 Result<int64_t> MemoryMappedFile::GetSize() {
@@ -696,7 +664,10 @@ Result<std::shared_ptr<Buffer>> MemoryMappedFile::ReadAt(int64_t position,
                           : std::unique_lock<std::mutex>();
 
   ARROW_ASSIGN_OR_RAISE(
-      nbytes, internal::ValidateReadRegion(position, nbytes, memory_map_->size()));
+      nbytes, internal::ValidateReadRange(position, nbytes, memory_map_->size()));
+  // Arrange to page data in
+  RETURN_NOT_OK(::arrow::internal::MemoryAdviseWillNeed(
+      {{memory_map_->data() + position, static_cast<size_t>(nbytes)}}));
   return memory_map_->Slice(position, nbytes);
 }
 
@@ -705,8 +676,9 @@ Result<int64_t> MemoryMappedFile::ReadAt(int64_t position, int64_t nbytes, void*
   auto guard_resize = memory_map_->writable()
                           ? std::unique_lock<std::mutex>(memory_map_->resize_lock())
                           : std::unique_lock<std::mutex>();
+
   ARROW_ASSIGN_OR_RAISE(
-      nbytes, internal::ValidateReadRegion(position, nbytes, memory_map_->size()));
+      nbytes, internal::ValidateReadRange(position, nbytes, memory_map_->size()));
   if (nbytes > 0) {
     memcpy(out, memory_map_->data() + position, static_cast<size_t>(nbytes));
   }
@@ -727,6 +699,33 @@ Result<std::shared_ptr<Buffer>> MemoryMappedFile::Read(int64_t nbytes) {
   return buffer;
 }
 
+Future<std::shared_ptr<Buffer>> MemoryMappedFile::ReadAsync(const AsyncContext&,
+                                                            int64_t position,
+                                                            int64_t nbytes) {
+  return Future<std::shared_ptr<Buffer>>::MakeFinished(ReadAt(position, nbytes));
+}
+
+Status MemoryMappedFile::WillNeed(const std::vector<ReadRange>& ranges) {
+  using ::arrow::internal::MemoryRegion;
+
+  RETURN_NOT_OK(memory_map_->CheckClosed());
+  auto guard_resize = memory_map_->writable()
+                          ? std::unique_lock<std::mutex>(memory_map_->resize_lock())
+                          : std::unique_lock<std::mutex>();
+
+  std::vector<MemoryRegion> regions(ranges.size());
+  for (size_t i = 0; i < ranges.size(); ++i) {
+    const auto& range = ranges[i];
+    ARROW_ASSIGN_OR_RAISE(
+        auto size,
+        internal::ValidateReadRange(range.offset, range.length, memory_map_->size()));
+    DCHECK_NE(memory_map_->data(), nullptr);
+    regions[i] = {const_cast<uint8_t*>(memory_map_->data() + range.offset),
+                  static_cast<size_t>(size)};
+  }
+  return ::arrow::internal::MemoryAdviseWillNeed(regions);
+}
+
 bool MemoryMappedFile::supports_zero_copy() const { return true; }
 
 Status MemoryMappedFile::WriteAt(int64_t position, const void* data, int64_t nbytes) {
@@ -736,7 +735,7 @@ Status MemoryMappedFile::WriteAt(int64_t position, const void* data, int64_t nby
   if (!memory_map_->opened() || !memory_map_->writable()) {
     return Status::IOError("Unable to write");
   }
-  RETURN_NOT_OK(internal::ValidateWriteRegion(position, nbytes, memory_map_->size()));
+  RETURN_NOT_OK(internal::ValidateWriteRange(position, nbytes, memory_map_->size()));
 
   RETURN_NOT_OK(memory_map_->Seek(position));
   return WriteInternal(data, nbytes);
@@ -749,8 +748,8 @@ Status MemoryMappedFile::Write(const void* data, int64_t nbytes) {
   if (!memory_map_->opened() || !memory_map_->writable()) {
     return Status::IOError("Unable to write");
   }
-  RETURN_NOT_OK(internal::ValidateWriteRegion(memory_map_->position(), nbytes,
-                                              memory_map_->size()));
+  RETURN_NOT_OK(
+      internal::ValidateWriteRange(memory_map_->position(), nbytes, memory_map_->size()));
 
   return WriteInternal(data, nbytes);
 }

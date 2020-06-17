@@ -25,6 +25,7 @@
 #include "arrow/array.h"
 #include "arrow/type.h"
 #include "arrow/type_traits.h"
+#include "arrow/util/bitmap_reader.h"
 #include "arrow/util/checked_cast.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/optional.h"
@@ -565,7 +566,7 @@ class TypedStatisticsImpl : public TypedStatistics<DType> {
   }
 
   void SetMinMaxPair(std::pair<T, T> min_max) {
-    // CleanStatistic can return a nullopt in case of erronous values, e.g. NaN
+    // CleanStatistic can return a nullopt in case of erroneous values, e.g. NaN
     auto maybe_min_max = CleanStatistic(min_max);
     if (!maybe_min_max) return;
 

@@ -28,6 +28,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
+import org.apache.arrow.memory.ArrowBuf;
 import org.apache.arrow.util.Preconditions;
 import org.apache.arrow.vector.BaseVariableWidthVector;
 import org.apache.arrow.vector.BigIntVector;
@@ -78,8 +79,6 @@ import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.util.DefaultPrettyPrinter;
 import com.fasterxml.jackson.core.util.DefaultPrettyPrinter.NopIndenter;
 import com.fasterxml.jackson.databind.MappingJsonFactory;
-
-import io.netty.buffer.ArrowBuf;
 
 /**
  * A writer that converts binary Vectors into a JSON format suitable
@@ -195,7 +194,7 @@ public class JsonFileWriter implements AutoCloseable {
       generator.writeObjectField("count", recordBatch.getRowCount());
       generator.writeArrayFieldStart("columns");
       for (Field field : recordBatch.getSchema().getFields()) {
-        FieldVector vector = recordBatch.getVector(field.getName());
+        FieldVector vector = recordBatch.getVector(field);
         writeFromVectorIntoJson(field, vector);
       }
       generator.writeEndArray();

@@ -15,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef GDV_FUNCTION_STUBS_H
-#define GDV_FUNCTION_STUBS_H
+#pragma once
 
 #include <cstdint>
 
@@ -38,6 +37,12 @@ uint8_t* gdv_fn_context_arena_malloc(int64_t context_ptr, int32_t data_len);
 
 void gdv_fn_context_arena_reset(int64_t context_ptr);
 
+bool gdv_fn_context_parse_float32(int64_t context_ptr, const char* data, int32_t len,
+                                  float* val);
+
+bool gdv_fn_context_parse_float64(int64_t context_ptr, const char* data, int32_t len,
+                                  double* val);
+
 bool in_expr_lookup_int32(int64_t ptr, int32_t value, bool in_validity);
 
 bool in_expr_lookup_int64(int64_t ptr, int64_t value, bool in_validity);
@@ -54,5 +59,3 @@ int32_t gdv_fn_dec_from_string(int64_t context, const char* in, int32_t in_lengt
 char* gdv_fn_dec_to_string(int64_t context, int64_t x_high, uint64_t x_low,
                            int32_t x_scale, int32_t* dec_str_len);
 }
-
-#endif  // GDV_FUNCTION_STUBS_H

@@ -454,11 +454,19 @@ DATE_TRUNC_FUNCTIONS(timestamp)
 FORCE_INLINE
 gdv_date64 castDATE_int64(gdv_int64 in) { return in; }
 
+FORCE_INLINE
+gdv_date32 castDATE_int32(gdv_int32 in) { return in; }
+
+FORCE_INLINE
+gdv_date64 castDATE_date32(gdv_date32 days) {
+  return days * static_cast<gdv_date64>(MILLIS_IN_DAY);
+}
+
 static int days_in_month[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
 
 bool IsLastDayOfMonth(const EpochTimePoint& tp) {
   if (tp.TmMon() != 1) {
-    // not February. Dont worry about leap year
+    // not February. Don't worry about leap year
     return (tp.TmMday() == days_in_month[tp.TmMon()]);
   }
 
@@ -618,7 +626,7 @@ gdv_timestamp castTIMESTAMP_utf8(int64_t context, const char* input, gdv_int32 l
           ts_field_index++;
           break;
         case '+':
-          // +08:00, means time zone is 8 hours ahead. Need to substract.
+          // +08:00, means time zone is 8 hours ahead. Need to subtract.
           add_displacement = false;
           ts_field_index = TimeFields::kDisplacementHours;
           break;
@@ -738,4 +746,23 @@ const char* castVARCHAR_timestamp_int64(gdv_int64 context, gdv_timestamp in,
   memcpy(ret, char_buffer, *out_len);
   return ret;
 }
+
+FORCE_INLINE
+gdv_int64 extractDay_daytimeinterval(gdv_day_time_interval in) {
+  gdv_int32 days = static_cast<gdv_int32>(in & 0x00000000FFFFFFFF);
+  return static_cast<gdv_int64>(days);
+}
+
+FORCE_INLINE
+gdv_int64 extractMillis_daytimeinterval(gdv_day_time_interval in) {
+  gdv_int32 millis = static_cast<gdv_int32>((in & 0xFFFFFFFF00000000) >> 32);
+  return static_cast<gdv_int64>(millis);
+}
+
+FORCE_INLINE
+gdv_int64 castBIGINT_daytimeinterval(gdv_day_time_interval in) {
+  return extractMillis_daytimeinterval(in) +
+         extractDay_daytimeinterval(in) * MILLIS_IN_DAY;
+}
+
 }  // extern "C"

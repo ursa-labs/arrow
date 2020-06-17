@@ -118,11 +118,9 @@ G_DEFINE_ABSTRACT_TYPE_WITH_PRIVATE(GArrowDataType,
 static void
 garrow_data_type_finalize(GObject *object)
 {
-  GArrowDataTypePrivate *priv;
+  auto priv = GARROW_DATA_TYPE_GET_PRIVATE(object);
 
-  priv = GARROW_DATA_TYPE_GET_PRIVATE(object);
-
-  priv->data_type = nullptr;
+  priv->data_type.~shared_ptr();
 
   G_OBJECT_CLASS(garrow_data_type_parent_class)->finalize(object);
 }
@@ -133,9 +131,7 @@ garrow_data_type_set_property(GObject *object,
                               const GValue *value,
                               GParamSpec *pspec)
 {
-  GArrowDataTypePrivate *priv;
-
-  priv = GARROW_DATA_TYPE_GET_PRIVATE(object);
+  auto priv = GARROW_DATA_TYPE_GET_PRIVATE(object);
 
   switch (prop_id) {
   case PROP_DATA_TYPE:
@@ -164,6 +160,8 @@ garrow_data_type_get_property(GObject *object,
 static void
 garrow_data_type_init(GArrowDataType *object)
 {
+  auto priv = GARROW_DATA_TYPE_GET_PRIVATE(object);
+  new(&priv->data_type) std::shared_ptr<arrow::DataType>;
 }
 
 static void
@@ -361,7 +359,7 @@ garrow_integer_data_type_class_init(GArrowIntegerDataTypeClass *klass)
  *
  * Returns: %TRUE if the data type is signed, %FALSE otherwise.
  *
- * Since: 1.0.0
+ * Since: 0.16.0
  */
 gboolean
 garrow_integer_data_type_is_signed(GArrowIntegerDataType *data_type)
@@ -812,7 +810,7 @@ garrow_large_binary_data_type_class_init(GArrowLargeBinaryDataTypeClass *klass)
  *
  * Returns: The newly created #GArrowLargeBinaryDataType.
  *
- * Since: 1.0.0
+ * Since: 0.17.0
  */
 GArrowLargeBinaryDataType *
 garrow_large_binary_data_type_new(void)
@@ -878,7 +876,7 @@ garrow_large_string_data_type_class_init(GArrowLargeStringDataTypeClass *klass)
  *
  * Returns: The newly created #GArrowLargeStringDataType.
  *
- * Since: 1.0.0
+ * Since: 0.17.0
  */
 GArrowLargeStringDataType *
 garrow_large_string_data_type_new(void)
@@ -1378,16 +1376,11 @@ garrow_data_type_new_raw(std::shared_ptr<arrow::DataType> *arrow_data_type)
   case arrow::Type::type::STRUCT:
     type = GARROW_TYPE_STRUCT_DATA_TYPE;
     break;
-  case arrow::Type::type::UNION:
-    {
-      auto arrow_union_data_type =
-        std::static_pointer_cast<arrow::UnionType>(*arrow_data_type);
-      if (arrow_union_data_type->mode() == arrow::UnionMode::SPARSE) {
-        type = GARROW_TYPE_SPARSE_UNION_DATA_TYPE;
-      } else {
-        type = GARROW_TYPE_DENSE_UNION_DATA_TYPE;
-      }
-    }
+  case arrow::Type::type::SPARSE_UNION:
+    type = GARROW_TYPE_SPARSE_UNION_DATA_TYPE;
+    break;
+  case arrow::Type::type::DENSE_UNION:
+    type = GARROW_TYPE_DENSE_UNION_DATA_TYPE;
     break;
   case arrow::Type::type::DICTIONARY:
     type = GARROW_TYPE_DICTIONARY_DATA_TYPE;
@@ -1408,8 +1401,6 @@ garrow_data_type_new_raw(std::shared_ptr<arrow::DataType> *arrow_data_type)
 std::shared_ptr<arrow::DataType>
 garrow_data_type_get_raw(GArrowDataType *data_type)
 {
-  GArrowDataTypePrivate *priv;
-
-  priv = GARROW_DATA_TYPE_GET_PRIVATE(data_type);
+  auto priv = GARROW_DATA_TYPE_GET_PRIVATE(data_type);
   return priv->data_type;
 }

@@ -145,7 +145,7 @@ impl BatchIterator for SelectionIterator {
 mod tests {
 
     use super::*;
-    use crate::execution::physical_plan::csv::CsvExec;
+    use crate::execution::physical_plan::csv::{CsvExec, CsvReadOptions};
     use crate::execution::physical_plan::expressions::*;
     use crate::execution::physical_plan::ExecutionPlan;
     use crate::logicalplan::{Operator, ScalarValue};
@@ -159,12 +159,21 @@ mod tests {
         let partitions = 4;
         let path = test::create_partitioned_csv("aggregate_test_100.csv", partitions)?;
 
-        let csv = CsvExec::try_new(&path, schema, true, None, 1024)?;
+        let csv =
+            CsvExec::try_new(&path, CsvReadOptions::new().schema(&schema), None, 1024)?;
 
         let predicate: Arc<dyn PhysicalExpr> = binary(
-            binary(col(1), Operator::Gt, lit(ScalarValue::UInt32(1))),
+            binary(
+                col(1, schema.as_ref()),
+                Operator::Gt,
+                lit(ScalarValue::UInt32(1)),
+            ),
             Operator::And,
-            binary(col(1), Operator::Lt, lit(ScalarValue::UInt32(4))),
+            binary(
+                col(1, schema.as_ref()),
+                Operator::Lt,
+                lit(ScalarValue::UInt32(4)),
+            ),
         );
 
         let selection: Arc<dyn ExecutionPlan> =

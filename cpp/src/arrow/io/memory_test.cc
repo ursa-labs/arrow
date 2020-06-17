@@ -16,22 +16,28 @@
 // under the License.
 
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <ostream>
 #include <string>
+#include <vector>
 
 #include <gtest/gtest.h>
 
 #include "arrow/buffer.h"
+#include "arrow/io/caching.h"
 #include "arrow/io/interfaces.h"
 #include "arrow/io/memory.h"
 #include "arrow/io/slow.h"
+#include "arrow/io/util_internal.h"
 #include "arrow/status.h"
 #include "arrow/testing/gtest_util.h"
 #include "arrow/testing/util.h"
 #include "arrow/util/checked_cast.h"
+#include "arrow/util/future.h"
 #include "arrow/util/iterator.h"
 
 namespace arrow {
@@ -40,10 +46,14 @@ using internal::checked_cast;
 
 namespace io {
 
+std::ostream& operator<<(std::ostream& os, const ReadRange& range) {
+  return os << "<offset=" << range.offset << ", length=" << range.length << ">";
+}
+
 class TestBufferOutputStream : public ::testing::Test {
  public:
   void SetUp() {
-    ASSERT_OK(AllocateResizableBuffer(0, &buffer_));
+    ASSERT_OK_AND_ASSIGN(buffer_, AllocateResizableBuffer(0));
     stream_.reset(new BufferOutputStream(buffer_));
   }
 
@@ -106,8 +116,7 @@ TEST_F(TestBufferOutputStream, Reset) {
 }
 
 TEST(TestFixedSizeBufferWriter, Basics) {
-  std::shared_ptr<Buffer> buffer;
-  ASSERT_OK(AllocateBuffer(1024, &buffer));
+  ASSERT_OK_AND_ASSIGN(std::shared_ptr<Buffer> buffer, AllocateBuffer(1024));
 
   FixedSizeBufferWriter writer(buffer);
 
@@ -136,8 +145,7 @@ TEST(TestFixedSizeBufferWriter, Basics) {
 }
 
 TEST(TestFixedSizeBufferWriter, InvalidWrites) {
-  std::shared_ptr<Buffer> buffer;
-  ASSERT_OK(AllocateBuffer(1024, &buffer));
+  ASSERT_OK_AND_ASSIGN(std::shared_ptr<Buffer> buffer, AllocateBuffer(1024));
 
   FixedSizeBufferWriter writer(buffer);
   const uint8_t data[10]{};
@@ -197,6 +205,21 @@ TEST(TestBufferReader, Peek) {
   ASSERT_EQ(data, view.to_string());
 }
 
+TEST(TestBufferReader, ReadAsync) {
+  std::string data = "data123456";
+
+  BufferReader reader(std::make_shared<Buffer>(data));
+
+  auto fut1 = reader.ReadAsync({}, 2, 6);
+  auto fut2 = reader.ReadAsync({}, 1, 4);
+  ASSERT_EQ(fut1.state(), FutureState::SUCCESS);
+  ASSERT_EQ(fut2.state(), FutureState::SUCCESS);
+  ASSERT_OK_AND_ASSIGN(auto buf, fut1.result());
+  AssertBufferEqual(*buf, "ta1234");
+  ASSERT_OK_AND_ASSIGN(buf, fut2.result());
+  AssertBufferEqual(*buf, "ata1");
+}
+
 TEST(TestBufferReader, InvalidReads) {
   std::string data = "data123456";
   BufferReader reader(std::make_shared<Buffer>(data));
@@ -206,6 +229,9 @@ TEST(TestBufferReader, InvalidReads) {
   ASSERT_RAISES(Invalid, reader.ReadAt(1, -1));
   ASSERT_RAISES(Invalid, reader.ReadAt(-1, 1, buffer));
   ASSERT_RAISES(Invalid, reader.ReadAt(1, -1, buffer));
+
+  ASSERT_RAISES(Invalid, reader.ReadAsync({}, -1, 1).result());
+  ASSERT_RAISES(Invalid, reader.ReadAsync({}, 1, -1).result());
 }
 
 TEST(TestBufferReader, RetainParentReference) {
@@ -215,8 +241,8 @@ TEST(TestBufferReader, RetainParentReference) {
   std::shared_ptr<Buffer> slice1;
   std::shared_ptr<Buffer> slice2;
   {
-    std::shared_ptr<Buffer> buffer;
-    ASSERT_OK(AllocateBuffer(nullptr, static_cast<int64_t>(data.size()), &buffer));
+    ASSERT_OK_AND_ASSIGN(std::shared_ptr<Buffer> buffer,
+                         AllocateBuffer(static_cast<int64_t>(data.size())));
     std::memcpy(buffer->mutable_data(), data.c_str(), data.size());
     BufferReader reader(buffer);
     ASSERT_OK_AND_ASSIGN(slice1, reader.Read(4));
@@ -227,6 +253,26 @@ TEST(TestBufferReader, RetainParentReference) {
 
   ASSERT_EQ(0, std::memcmp(slice1->data(), data.c_str(), 4));
   ASSERT_EQ(0, std::memcmp(slice2->data(), data.c_str() + 4, 6));
+}
+
+TEST(TestBufferReader, WillNeed) {
+  {
+    std::string data = "data123456";
+    BufferReader reader(std::make_shared<Buffer>(data));
+
+    ASSERT_OK(reader.WillNeed({}));
+    ASSERT_OK(reader.WillNeed({{0, 4}, {4, 6}}));
+    ASSERT_OK(reader.WillNeed({{10, 0}}));
+    ASSERT_RAISES(IOError, reader.WillNeed({{11, 1}}));  // Out of bounds
+  }
+  {
+    std::string data = "data123456";
+    BufferReader reader(reinterpret_cast<const uint8_t*>(data.data()),
+                        static_cast<int64_t>(data.size()));
+
+    ASSERT_OK(reader.WillNeed({{0, 4}, {4, 6}}));
+    ASSERT_RAISES(IOError, reader.WillNeed({{11, 1}}));  // Out of bounds
+  }
 }
 
 TEST(TestRandomAccessFile, GetStream) {
@@ -296,10 +342,8 @@ TEST(TestMemcopy, ParallelMemcopy) {
     // randomize size so the memcopy alignment is tested
     int64_t total_size = 3 * THRESHOLD + std::rand() % 100;
 
-    std::shared_ptr<Buffer> buffer1, buffer2;
-
-    ASSERT_OK(AllocateBuffer(total_size, &buffer1));
-    ASSERT_OK(AllocateBuffer(total_size, &buffer2));
+    ASSERT_OK_AND_ASSIGN(std::shared_ptr<Buffer> buffer1, AllocateBuffer(total_size));
+    ASSERT_OK_AND_ASSIGN(std::shared_ptr<Buffer> buffer2, AllocateBuffer(total_size));
 
     random_bytes(total_size, 0, buffer2->mutable_data());
 
@@ -348,6 +392,9 @@ TEST(TestSlowInputStream, Basics) { TestSlowInputStream<SlowInputStream>(); }
 
 TEST(TestSlowRandomAccessFile, Basics) { TestSlowInputStream<SlowRandomAccessFile>(); }
 
+// -----------------------------------------------------------------------
+// Test various utilities
+
 TEST(TestInputStreamIterator, Basics) {
   auto reader = std::make_shared<BufferReader>(Buffer::FromString("data123456"));
   ASSERT_OK_AND_ASSIGN(auto it, MakeInputStreamIterator(reader, /*block_size=*/3));
@@ -378,6 +425,110 @@ TEST(TestInputStreamIterator, Closed) {
   // Close stream and read from iterator
   ASSERT_OK(reader->Close());
   ASSERT_RAISES(Invalid, it.Next().status());
+}
+
+TEST(CoalesceReadRanges, Basics) {
+  auto check = [](std::vector<ReadRange> ranges,
+                  std::vector<ReadRange> expected) -> void {
+    const int64_t hole_size_limit = 9;
+    const int64_t range_size_limit = 99;
+    auto coalesced =
+        internal::CoalesceReadRanges(ranges, hole_size_limit, range_size_limit);
+    ASSERT_EQ(coalesced, expected);
+  };
+
+  check({}, {});
+  // Zero sized range that ends up in empty list
+  check({{110, 0}}, {});
+  // Combination on 1 zero sized range and 1 non-zero sized range
+  check({{110, 10}, {120, 0}}, {{110, 10}});
+  // 1 non-zero sized range
+  check({{110, 10}}, {{110, 10}});
+  // No holes + unordered ranges
+  check({{130, 10}, {110, 10}, {120, 10}}, {{110, 30}});
+  // No holes
+  check({{110, 10}, {120, 10}, {130, 10}}, {{110, 30}});
+  // Small holes only
+  check({{110, 11}, {130, 11}, {150, 11}}, {{110, 51}});
+  // Large holes
+  check({{110, 10}, {130, 10}}, {{110, 10}, {130, 10}});
+  check({{110, 11}, {130, 11}, {150, 10}, {170, 11}, {190, 11}}, {{110, 50}, {170, 31}});
+
+  // With zero-sized ranges
+  check({{110, 11}, {130, 0}, {130, 11}, {145, 0}, {150, 11}, {200, 0}}, {{110, 51}});
+
+  // No holes but large ranges
+  check({{110, 100}, {210, 100}}, {{110, 100}, {210, 100}});
+  // Small holes and large range in the middle (*)
+  check({{110, 10}, {120, 11}, {140, 100}, {240, 11}, {260, 11}},
+        {{110, 21}, {140, 100}, {240, 31}});
+  // Mid-size ranges that would turn large after coalescing
+  check({{100, 50}, {150, 50}}, {{100, 50}, {150, 50}});
+  check({{100, 30}, {130, 30}, {160, 30}, {190, 30}, {220, 30}}, {{100, 90}, {190, 60}});
+
+  // Same as (*) but unsorted
+  check({{140, 100}, {120, 11}, {240, 11}, {110, 10}, {260, 11}},
+        {{110, 21}, {140, 100}, {240, 31}});
+}
+
+TEST(RangeReadCache, Basics) {
+  std::string data = "abcdefghijklmnopqrstuvwxyz";
+
+  auto file = std::make_shared<BufferReader>(Buffer(data));
+  CacheOptions options = CacheOptions::Defaults();
+  options.hole_size_limit = 2;
+  options.range_size_limit = 10;
+  internal::ReadRangeCache cache(file, {}, options);
+
+  ASSERT_OK(cache.Cache({{1, 2}, {3, 2}, {8, 2}, {20, 2}, {25, 0}}));
+  ASSERT_OK(cache.Cache({{10, 4}, {14, 0}, {15, 4}}));
+
+  ASSERT_OK_AND_ASSIGN(auto buf, cache.Read({20, 2}));
+  AssertBufferEqual(*buf, "uv");
+  ASSERT_OK_AND_ASSIGN(buf, cache.Read({1, 2}));
+  AssertBufferEqual(*buf, "bc");
+  ASSERT_OK_AND_ASSIGN(buf, cache.Read({3, 2}));
+  AssertBufferEqual(*buf, "de");
+  ASSERT_OK_AND_ASSIGN(buf, cache.Read({8, 2}));
+  AssertBufferEqual(*buf, "ij");
+  ASSERT_OK_AND_ASSIGN(buf, cache.Read({10, 4}));
+  AssertBufferEqual(*buf, "klmn");
+  ASSERT_OK_AND_ASSIGN(buf, cache.Read({15, 4}));
+  AssertBufferEqual(*buf, "pqrs");
+  // Zero-sized
+  ASSERT_OK_AND_ASSIGN(buf, cache.Read({14, 0}));
+  AssertBufferEqual(*buf, "");
+  ASSERT_OK_AND_ASSIGN(buf, cache.Read({25, 0}));
+  AssertBufferEqual(*buf, "");
+
+  // Non-cached ranges
+  ASSERT_RAISES(Invalid, cache.Read({20, 3}));
+  ASSERT_RAISES(Invalid, cache.Read({19, 3}));
+  ASSERT_RAISES(Invalid, cache.Read({0, 3}));
+  ASSERT_RAISES(Invalid, cache.Read({25, 2}));
+}
+
+TEST(CacheOptions, Basics) {
+  auto check = [](const CacheOptions actual, const double expected_hole_size_limit_MiB,
+                  const double expected_range_size_limit_MiB) -> void {
+    const CacheOptions expected = {
+        static_cast<int64_t>(std::round(expected_hole_size_limit_MiB * 1024 * 1024)),
+        static_cast<int64_t>(std::round(expected_range_size_limit_MiB * 1024 * 1024))};
+    ASSERT_EQ(actual, expected);
+  };
+
+  // Test: normal usage.
+  // TTFB = 5 ms, BW = 500 MiB/s,
+  // we expect hole_size_limit = 2.5 MiB, and range_size_limit = 22.5 MiB
+  check(CacheOptions::MakeFromNetworkMetrics(5, 500), 2.5, 22.5);
+  // Test: custom bandwidth utilization.
+  // TTFB = 5 ms, BW = 500 MiB/s, BW_utilization = 75%,
+  // we expect a change in range_size_limit = 7.5 MiB.
+  check(CacheOptions::MakeFromNetworkMetrics(5, 500, .75), 2.5, 7.5);
+  // Test: custom max_ideal_request_size, range_size_limit gets capped.
+  // TTFB = 5 ms, BW = 500 MiB/s, BW_utilization = 75%, max_ideal_request_size = 5 MiB,
+  // we expect the range_size_limit to be capped at 5 MiB.
+  check(CacheOptions::MakeFromNetworkMetrics(5, 500, .75, 5), 2.5, 5);
 }
 
 }  // namespace io

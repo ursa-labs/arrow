@@ -67,15 +67,21 @@ PIP="${CPYTHON_PATH}/bin/pip"
 # Put our Python first to avoid picking up an antiquated Python from CMake
 PATH="${CPYTHON_PATH}/bin:${PATH}"
 
-echo "=== (${PYTHON_VERSION}) Install the wheel build dependencies ==="
-$PIP install -r requirements-wheel.txt
+# XXX The Docker image doesn't include Python libs, this confuses CMake
+# (https://github.com/pypa/manylinux/issues/484)
+py_libname=$(${PYTHON_INTERPRETER} -c "import sysconfig; print(sysconfig.get_config_var('LDLIBRARY'))")
+touch ${CPYTHON_PATH}/lib/${py_libname}
 
+echo "=== (${PYTHON_VERSION}) Install the wheel build dependencies ==="
+$PIP install -r requirements-wheel-build.txt
+
+export PYARROW_INSTALL_TESTS=1
 export PYARROW_WITH_DATASET=1
 export PYARROW_WITH_FLIGHT=1
-export PYARROW_WITH_GANDIVA=1
+export PYARROW_WITH_GANDIVA=0
 export BUILD_ARROW_DATASET=ON
 export BUILD_ARROW_FLIGHT=ON
-export BUILD_ARROW_GANDIVA=ON
+export BUILD_ARROW_GANDIVA=OFF
 
 # ARROW-3052(wesm): ORC is being bundled until it can be added to the
 # manylinux1 image
@@ -88,6 +94,7 @@ cmake \
     -DCMAKE_BUILD_TYPE=Release \
     -DARROW_BOOST_USE_SHARED=ON \
     -DARROW_BUILD_SHARED=ON \
+    -DARROW_BUILD_STATIC=OFF \
     -DARROW_BUILD_TESTS=OFF \
     -DARROW_DATASET=${BUILD_ARROW_DATASET} \
     -DARROW_DEPENDENCY_SOURCE="SYSTEM" \
@@ -95,6 +102,7 @@ cmake \
     -DARROW_GANDIVA_JAVA=OFF \
     -DARROW_GANDIVA_PC_CXX_FLAGS="-isystem;/opt/rh/devtoolset-2/root/usr/include/c++/4.8.2;-isystem;/opt/rh/devtoolset-2/root/usr/include/c++/4.8.2/x86_64-CentOS-linux/" \
     -DARROW_GANDIVA=${BUILD_ARROW_GANDIVA} \
+    -DARROW_GRPC_USE_SHARED=OFF \
     -DARROW_HDFS=ON \
     -DARROW_JEMALLOC=ON \
     -DARROW_ORC=OFF \
@@ -109,13 +117,14 @@ cmake \
     -DARROW_WITH_SNAPPY=ON \
     -DARROW_WITH_ZLIB=ON \
     -DARROW_WITH_ZSTD=ON \
+    -DARROW_ZSTD_USE_SHARED=OFF \
     -DBoost_NAMESPACE=arrow_boost \
     -DBOOST_ROOT=/arrow_boost_dist \
     -DCMAKE_INSTALL_LIBDIR=lib \
     -DCMAKE_INSTALL_PREFIX=/arrow-dist \
+    -DCMAKE_UNITY_BUILD=ON \
     -DOPENSSL_USE_STATIC_LIBS=ON \
     -DORC_SOURCE=BUNDLED \
-    -DPythonInterp_FIND_VERSION=${PYTHON_VERSION} \
     -GNinja /arrow/cpp
 ninja
 ninja install
@@ -151,11 +160,12 @@ else
   $PYTHON_INTERPRETER -c "
 import sys
 import pyarrow
+import pyarrow.csv
 import pyarrow.dataset
 import pyarrow.flight
-import pyarrow.gandiva
 import pyarrow.fs
 import pyarrow._hdfs
+import pyarrow.json
 import pyarrow.parquet
 import pyarrow.plasma
   "

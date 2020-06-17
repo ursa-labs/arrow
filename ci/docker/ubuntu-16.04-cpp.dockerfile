@@ -21,19 +21,25 @@ FROM ${arch}/ubuntu:16.04
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ENV DEBIAN_FRONTEND noninteractive
+
+# LLVM 10 or later requires C++ 14 but g++-5's C++ 14 support is limited.
+# cpp/src/arrow/vendored/datetime/date.h doesn't work.
+# ARG llvm
+ENV llvm=8
 RUN apt-get update -y -q && \
-    apt-get install -y -q --no-install-recommends wget software-properties-common && \
+    apt-get install -y -q --no-install-recommends \
+        apt-transport-https \
+        software-properties-common \
+        wget && \
     wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - && \
-    apt-add-repository -y "deb http://apt.llvm.org/xenial/ llvm-toolchain-xenial-7 main" && \
+    apt-add-repository -y "deb https://apt.llvm.org/xenial/ llvm-toolchain-xenial-${llvm} main" && \
     apt-get update -y -q && \
     apt-get install -y -q --no-install-recommends \
         autoconf \
-        bison \
         ca-certificates \
         ccache \
-        clang-7 \
+        clang-${llvm} \
         cmake \
-        flex \
         g++ \
         gcc \
         gdb \
@@ -44,9 +50,9 @@ RUN apt-get update -y -q && \
         libgoogle-glog-dev \
         liblz4-dev \
         libre2-dev \
-        libsnappy-dev \
         libssl-dev \
-        llvm-7-dev \
+        libzstd1-dev \
+        llvm-${llvm}-dev \
         make \
         ninja-build \
         pkg-config \
@@ -58,15 +64,14 @@ RUN apt-get update -y -q && \
 
 # Benchmark is deactivated as the external project requires CMake 3.6+
 # Gandiva JNI is deactivated as it requires CMake 3.11+
-# TODO(ARROW-4761): libzstd is too old and external project requires CMake 3.7+
 # - c-ares in Xenial isn't recognized by gRPC build system
 # - libprotobuf-dev / libprotoc-dev in Xenial too old for gRPC
 # - libboost-all-dev does not include Boost.Process, needed for Flight
 #   unit tests, so doing vendored build by default
 ENV ARROW_BUILD_BENCHMARKS=OFF \
     ARROW_BUILD_TESTS=ON \
-    ARROW_DEPENDENCY_SOURCE=SYSTEM \
     ARROW_DATASET=ON \
+    ARROW_DEPENDENCY_SOURCE=SYSTEM \
     ARROW_GANDIVA_JAVA=OFF \
     ARROW_GANDIVA=ON \
     ARROW_HOME=/usr/local \
@@ -77,7 +82,7 @@ ENV ARROW_BUILD_BENCHMARKS=OFF \
     ARROW_WITH_LZ4=ON \
     ARROW_WITH_SNAPPY=ON \
     ARROW_WITH_ZLIB=ON \
-    ARROW_WITH_ZSTD=OFF \
+    ARROW_WITH_ZSTD=ON \
     BOOST_SOURCE=BUNDLED \
     cares_SOURCE=BUNDLED \
     CC=gcc \
@@ -85,9 +90,10 @@ ENV ARROW_BUILD_BENCHMARKS=OFF \
     gRPC_SOURCE=BUNDLED \
     GTest_SOURCE=BUNDLED \
     ORC_SOURCE=BUNDLED \
-    PARQUET_BUILD_EXECUTABLES=ON \
     PARQUET_BUILD_EXAMPLES=ON \
+    PARQUET_BUILD_EXECUTABLES=ON \
     PATH=/usr/lib/ccache/:$PATH \
     Protobuf_SOURCE=BUNDLED \
     RapidJSON_SOURCE=BUNDLED \
+    Snappy_SOURCE=BUNDLED \
     Thrift_SOURCE=BUNDLED

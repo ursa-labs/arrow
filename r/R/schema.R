@@ -47,8 +47,9 @@
 #' - `$fields`: returns the list of `Field`s in the `Schema`, suitable for
 #'   iterating over
 #' - `$HasMetadata`: logical: does this `Schema` have extra metadata?
-#' - `$metadata`: returns the extra metadata, if present, else `NULL`
-#'
+#' - `$metadata`: returns the key-value metadata as a named list.
+#'    Modify or replace by assigning in (`sch$metadata <- new_metadata`).
+#'    All list elements are coerced to string.
 #' @rdname Schema
 #' @name Schema
 #' @examples
@@ -61,7 +62,7 @@
 #' }
 #' @export
 Schema <- R6Class("Schema",
-  inherit = Object,
+  inherit = ArrowObject,
   public = list(
     ToString = function() {
       fields <- print_schema_fields(self)
@@ -73,12 +74,11 @@ Schema <- R6Class("Schema",
     field = function(i) shared_ptr(Field, Schema__field(self, i)),
     GetFieldByName = function(x) shared_ptr(Field, Schema__GetFieldByName(self, x)),
     serialize = function() Schema__serialize(self),
-    WithMetadata = function(metadata = list()) {
-      # metadata must be a named character vector
-      metadata <- map_chr(metadata, as.character)
+    WithMetadata = function(metadata = NULL) {
+      metadata <- prepare_key_value_metadata(metadata)
       shared_ptr(Schema, Schema__WithMetadata(self, metadata))
     },
-    Equals = function(other, check_metadata = TRUE, ...) {
+    Equals = function(other, check_metadata = FALSE, ...) {
       inherits(other, "Schema") && Schema__Equals(self, other, isTRUE(check_metadata))
     }
   ),
@@ -87,16 +87,37 @@ Schema <- R6Class("Schema",
     num_fields = function() Schema__num_fields(self),
     fields = function() map(Schema__fields(self), shared_ptr, class = Field),
     HasMetadata = function() Schema__HasMetadata(self),
-    metadata = function() {
-      if (self$HasMetadata) {
+    metadata = function(new) {
+      if (missing(new)) {
         Schema__metadata(self)
       } else {
-        NULL
+        # Set the metadata
+        out <- self$WithMetadata(new)
+        # $WithMetadata returns a new object but we're modifying in place,
+        # so swap in that new C++ object pointer into our R6 object
+        self$set_pointer(out$pointer())
+        self
       }
     }
   )
 )
 Schema$create <- function(...) shared_ptr(Schema, schema_(.fields(list2(...))))
+
+prepare_key_value_metadata <- function(metadata) {
+  # key-value-metadata must be a named character vector;
+  # this function validates and coerces
+  if (is.null(metadata)) {
+    # NULL to remove metadata, so equivalent to setting an empty list
+    metadata <- empty_named_list()
+  }
+  if (is.null(names(metadata))) {
+    stop(
+      "Key-value metadata must be a named list or character vector",
+      call. = FALSE
+    )
+  }
+  map_chr(metadata, as.character)
+}
 
 print_schema_fields <- function(s) {
   # Alternative to Schema__ToString that doesn't print metadata
@@ -130,4 +151,20 @@ read_schema <- function(stream, ...) {
     }
     return(shared_ptr(Schema, ipc___ReadSchema_InputStream(stream)))
   }
+}
+
+#' Combine and harmonize schemas
+#'
+#' @param ... [Schema]s to unify
+#' @param schemas Alternatively, a list of schemas
+#' @return A `Schema` with the union of fields contained in the inputs
+#' @export
+#' @examples
+#' \dontrun{
+#' a <- schema(b = double(), c = bool())
+#' z <- schema(b = double(), k = utf8())
+#' unify_schemas(a, z),
+#' }
+unify_schemas <- function(..., schemas = list(...)) {
+  shared_ptr(Schema, arrow__UnifySchemas(schemas))
 }

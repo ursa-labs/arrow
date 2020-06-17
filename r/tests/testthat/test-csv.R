@@ -42,10 +42,6 @@ test_that("read_csv_arrow(as_data_frame=TRUE)", {
 
   tab1 <- read_csv_arrow(tf, as_data_frame = TRUE)
   expect_equivalent(iris, tab1)
-  tab2 <- read_csv_arrow(mmap_open(tf), as_data_frame = TRUE)
-  expect_equivalent(iris, tab2)
-  tab3 <- read_csv_arrow(ReadableFile$create(tf), as_data_frame = TRUE)
-  expect_equivalent(iris, tab3)
 })
 
 test_that("read_delim_arrow parsing options: delim", {
@@ -135,8 +131,6 @@ test_that("read_csv_arrow parsing options: skip_empty_rows", {
 })
 
 test_that("read_csv_arrow parsing options: na strings", {
-  # There's some weird crash that happens on Appveyor in this test
-  skip_on_os("windows")
   tf <- tempfile()
   on.exit(unlink(tf))
 
@@ -173,4 +167,16 @@ test_that("read_csv_arrow() respects col_select", {
 
   tib <- read_csv_arrow(tf, col_select = starts_with("Sepal"), as_data_frame = TRUE)
   expect_equal(tib, tibble::tibble(Sepal.Length = iris$Sepal.Length, Sepal.Width = iris$Sepal.Width))
+})
+
+test_that("read_csv_arrow() can detect compression from file name", {
+  tf <- tempfile(fileext = ".csv.gz")
+  on.exit(unlink(tf))
+
+  write.csv(iris, gzfile(tf), row.names = FALSE, quote = FALSE)
+
+  iris$Species <- as.character(iris$Species)
+
+  tab1 <- read_csv_arrow(tf)
+  expect_equivalent(iris, tab1)
 })

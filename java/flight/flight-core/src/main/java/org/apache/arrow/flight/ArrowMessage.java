@@ -31,6 +31,7 @@ import org.apache.arrow.flight.grpc.AddWritableBuffer;
 import org.apache.arrow.flight.grpc.GetReadableBuffer;
 import org.apache.arrow.flight.impl.Flight.FlightData;
 import org.apache.arrow.flight.impl.Flight.FlightDescriptor;
+import org.apache.arrow.memory.ArrowBuf;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.util.AutoCloseables;
 import org.apache.arrow.util.Preconditions;
@@ -52,7 +53,6 @@ import io.grpc.Drainable;
 import io.grpc.MethodDescriptor;
 import io.grpc.MethodDescriptor.Marshaller;
 import io.grpc.protobuf.ProtoUtils;
-import io.netty.buffer.ArrowBuf;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufInputStream;
 import io.netty.buffer.CompositeByteBuf;
@@ -154,6 +154,24 @@ class ArrowMessage implements AutoCloseable {
     this.appMetadata = null;
   }
 
+  /**
+   * Create an ArrowMessage containing only application metadata.
+   * @param appMetadata The application-provided metadata buffer.
+   */
+  public ArrowMessage(ArrowBuf appMetadata) {
+    this.message = null;
+    this.bufs = ImmutableList.of();
+    this.descriptor = null;
+    this.appMetadata = appMetadata;
+  }
+
+  public ArrowMessage(FlightDescriptor descriptor) {
+    this.message = null;
+    this.bufs = ImmutableList.of();
+    this.descriptor = descriptor;
+    this.appMetadata = null;
+  }
+
   private ArrowMessage(FlightDescriptor descriptor, MessageMetadataResult message, ArrowBuf appMetadata,
                        ArrowBuf buf) {
     this.message = message;
@@ -171,6 +189,10 @@ class ArrowMessage implements AutoCloseable {
   }
 
   public HeaderType getMessageType() {
+    if (message == null) {
+      // Null message occurs for metadata-only messages (in DoExchange)
+      return HeaderType.NONE;
+    }
     return HeaderType.getHeader(message.headerType());
   }
 
@@ -271,8 +293,19 @@ class ArrowMessage implements AutoCloseable {
    * @return InputStream
    */
   private InputStream asInputStream(BufferAllocator allocator) {
-    try {
+    if (message == null) {
+      // If we have no IPC message, it's a pure-metadata message
+      final FlightData.Builder builder = FlightData.newBuilder();
+      if (descriptor != null) {
+        builder.setFlightDescriptor(descriptor);
+      }
+      if (appMetadata != null) {
+        builder.setAppMetadata(ByteString.copyFrom(appMetadata.nioBuffer()));
+      }
+      return NO_BODY_MARSHALLER.stream(builder.build());
+    }
 
+    try {
       final ByteString bytes = ByteString.copyFrom(message.getMessageBuffer(),
           message.bytesAfterMessage());
 
@@ -291,7 +324,7 @@ class ArrowMessage implements AutoCloseable {
 
       Preconditions.checkArgument(getMessageType() == HeaderType.RECORD_BATCH ||
           getMessageType() == HeaderType.DICTIONARY_BATCH);
-      Preconditions.checkArgument(!bufs.isEmpty());
+      // There may be no buffers in the case that we write only a null array
       Preconditions.checkArgument(descriptor == null, "Descriptor should only be included in the schema message.");
 
       ByteArrayOutputStream baos = new ByteArrayOutputStream();
@@ -311,7 +344,7 @@ class ArrowMessage implements AutoCloseable {
         size += b.readableBytes();
         // [ARROW-4213] These buffers must be aligned to an 8-byte boundary in order to be readable from C++.
         if (b.readableBytes() % 8 != 0) {
-          int paddingBytes = (int)(8 - (b.readableBytes() % 8));
+          int paddingBytes = (int) (8 - (b.readableBytes() % 8));
           assert paddingBytes > 0 && paddingBytes < 8;
           size += paddingBytes;
           allBufs.add(PADDING_BUFFERS.get(paddingBytes).retain());
@@ -326,7 +359,8 @@ class ArrowMessage implements AutoCloseable {
 
       ArrowBuf initialBuf = allocator.buffer(baos.size());
       initialBuf.writeBytes(baos.toByteArray());
-      final CompositeByteBuf bb = new CompositeByteBuf(allocator.getAsByteBufAllocator(), true, bufs.size() + 1,
+      final CompositeByteBuf bb = new CompositeByteBuf(allocator.getAsByteBufAllocator(), true,
+          Math.max(2, bufs.size() + 1),
           ImmutableList.<ByteBuf>builder().add(initialBuf.asNettyBuffer()).addAll(allBufs).build());
       final ByteBufInputStream is = new DrainableByteBufInputStream(bb);
       return is;

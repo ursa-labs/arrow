@@ -39,6 +39,7 @@
 #include "arrow/type.h"
 #include "arrow/type_traits.h"
 #include "arrow/util/bit_util.h"
+#include "arrow/util/bitmap_ops.h"
 #include "arrow/util/checked_cast.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/macros.h"
@@ -257,14 +258,16 @@ class RangeEqualsVisitor {
       // TODO(wesm): really we should be comparing stretches of non-null data
       // rather than looking at one value at a time.
       if (union_mode == UnionMode::SPARSE) {
-        if (!left.child(child_num)->RangeEquals(i, i + 1, o_i, right.child(child_num))) {
+        if (!left.field(child_num)->RangeEquals(i, i + 1, o_i, right.field(child_num))) {
           return false;
         }
       } else {
-        const int32_t offset = left.raw_value_offsets()[i];
-        const int32_t o_offset = right.raw_value_offsets()[o_i];
-        if (!left.child(child_num)->RangeEquals(offset, offset + 1, o_offset,
-                                                right.child(child_num))) {
+        const int32_t offset =
+            checked_cast<const DenseUnionArray&>(left).raw_value_offsets()[i];
+        const int32_t o_offset =
+            checked_cast<const DenseUnionArray&>(right).raw_value_offsets()[o_i];
+        if (!left.field(child_num)->RangeEquals(offset, offset + 1, o_offset,
+                                                right.field(child_num))) {
           return false;
         }
       }
@@ -710,13 +713,13 @@ class TypeEqualsVisitor {
       : right_(right), check_metadata_(check_metadata), result_(false) {}
 
   Status VisitChildren(const DataType& left) {
-    if (left.num_children() != right_.num_children()) {
+    if (left.num_fields() != right_.num_fields()) {
       result_ = false;
       return Status::OK();
     }
 
-    for (int i = 0; i < left.num_children(); ++i) {
-      if (!left.child(i)->Equals(right_.child(i), check_metadata_)) {
+    for (int i = 0; i < left.num_fields(); ++i) {
+      if (!left.field(i)->Equals(right_.field(i), check_metadata_)) {
         result_ = false;
         return Status::OK();
       }
@@ -781,7 +784,9 @@ class TypeEqualsVisitor {
       result_ = false;
       return Status::OK();
     }
-    return VisitChildren(left);
+    result_ = left.key_type()->Equals(*right.key_type(), check_metadata_) &&
+              left.item_type()->Equals(*right.item_type(), check_metadata_);
+    return Status::OK();
   }
 
   Status Visit(const UnionType& left) {
@@ -793,7 +798,7 @@ class TypeEqualsVisitor {
     }
 
     result_ = std::equal(
-        left.children().begin(), left.children().end(), right.children().begin(),
+        left.fields().begin(), left.fields().end(), right.fields().begin(),
         [this](const std::shared_ptr<Field>& l, const std::shared_ptr<Field>& r) {
           return l->Equals(r, check_metadata_);
         });
@@ -850,7 +855,7 @@ class ScalarEqualsVisitor {
   template <typename T>
   typename std::enable_if<std::is_base_of<BaseBinaryScalar, T>::value, Status>::type
   Visit(const T& left) {
-    const auto& right = checked_cast<const BinaryScalar&>(right_);
+    const auto& right = checked_cast<const BaseBinaryScalar&>(right_);
     result_ = internal::SharedPtrEquals(left.value, right.value);
     return Status::OK();
   }
@@ -924,7 +929,8 @@ Status PrintDiff(const Array& left, const Array& right, std::ostream* os) {
   }
 
   if (!left.type()->Equals(right.type())) {
-    *os << "# Array types differed: " << *left.type() << " vs " << *right.type();
+    *os << "# Array types differed: " << *left.type() << " vs " << *right.type()
+        << std::endl;
     return Status::OK();
   }
 
@@ -960,7 +966,7 @@ Status PrintDiff(const Array& left, const Array& right, std::ostream* os) {
 bool ArrayEquals(const Array& left, const Array& right, const EqualOptions& opts) {
   bool are_equal = ArrayEqualsImpl<ArrayEqualsVisitor>(left, right, opts);
   if (!are_equal) {
-    DCHECK_OK(PrintDiff(left, right, opts.diff_sink()));
+    ARROW_IGNORE_EXPR(PrintDiff(left, right, opts.diff_sink()));
   }
   return are_equal;
 }

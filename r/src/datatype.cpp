@@ -23,6 +23,11 @@ using Rcpp::stop;
 using Rcpp::wrap;
 
 #if defined(ARROW_R_WITH_ARROW)
+#include <arrow/type.h>
+
+RCPP_EXPOSED_ENUM_NODECL(arrow::Type::type)
+RCPP_EXPOSED_ENUM_NODECL(arrow::DateUnit)
+RCPP_EXPOSED_ENUM_NODECL(arrow::TimeUnit::type)
 
 // [[arrow::export]]
 bool shared_ptr_is_null(SEXP xp) {
@@ -74,6 +79,9 @@ std::shared_ptr<arrow::DataType> Boolean__initialize() { return arrow::boolean()
 std::shared_ptr<arrow::DataType> Utf8__initialize() { return arrow::utf8(); }
 
 // [[arrow::export]]
+std::shared_ptr<arrow::DataType> Binary__initialize() { return arrow::binary(); }
+
+// [[arrow::export]]
 std::shared_ptr<arrow::DataType> Date32__initialize() { return arrow::date32(); }
 
 // [[arrow::export]]
@@ -85,22 +93,24 @@ std::shared_ptr<arrow::DataType> Null__initialize() { return arrow::null(); }
 // [[arrow::export]]
 std::shared_ptr<arrow::DataType> Decimal128Type__initialize(int32_t precision,
                                                             int32_t scale) {
-  return arrow::decimal(precision, scale);
+  // Use the builder that validates inputs
+  return ValueOrStop(arrow::Decimal128Type::Make(precision, scale));
 }
 
 // [[arrow::export]]
 std::shared_ptr<arrow::DataType> FixedSizeBinary__initialize(int32_t byte_width) {
+  if (byte_width == NA_INTEGER) {
+    Rcpp::stop("'byte_width' cannot be NA");
+  }
+  if (byte_width < 1) {
+    Rcpp::stop("'byte_width' must be > 0");
+  }
   return arrow::fixed_size_binary(byte_width);
 }
 
 // [[arrow::export]]
-std::shared_ptr<arrow::DataType> Timestamp__initialize1(arrow::TimeUnit::type unit) {
-  return arrow::timestamp(unit);
-}
-
-// [[arrow::export]]
-std::shared_ptr<arrow::DataType> Timestamp__initialize2(arrow::TimeUnit::type unit,
-                                                        const std::string& timezone) {
+std::shared_ptr<arrow::DataType> Timestamp__initialize(arrow::TimeUnit::type unit,
+                                                       const std::string& timezone) {
   return arrow::timestamp(unit, timezone);
 }
 
@@ -153,12 +163,12 @@ bool DataType__Equals(const std::shared_ptr<arrow::DataType>& lhs,
 
 // [[arrow::export]]
 int DataType__num_children(const std::shared_ptr<arrow::DataType>& type) {
-  return type->num_children();
+  return type->num_fields();
 }
 
 // [[arrow::export]]
 List DataType__children_pointer(const std::shared_ptr<arrow::DataType>& type) {
-  return List(type->children().begin(), type->children().end());
+  return List(type->fields().begin(), type->fields().end());
 }
 
 // [[arrow::export]]
@@ -211,7 +221,7 @@ arrow::TimeUnit::type TimestampType__unit(
 std::shared_ptr<arrow::DataType> DictionaryType__initialize(
     const std::shared_ptr<arrow::DataType>& index_type,
     const std::shared_ptr<arrow::DataType>& value_type, bool ordered) {
-  return VALUE_OR_STOP(arrow::DictionaryType::Make(index_type, value_type, ordered));
+  return ValueOrStop(arrow::DictionaryType::Make(index_type, value_type, ordered));
 }
 
 // [[arrow::export]]

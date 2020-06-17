@@ -339,9 +339,7 @@ G_DEFINE_ABSTRACT_TYPE_WITH_PRIVATE(GArrowArrayBuilder,
 static void
 garrow_array_builder_finalize(GObject *object)
 {
-  GArrowArrayBuilderPrivate *priv;
-
-  priv = GARROW_ARRAY_BUILDER_GET_PRIVATE(object);
+  auto priv = GARROW_ARRAY_BUILDER_GET_PRIVATE(object);
 
   if (priv->have_ownership) {
     delete priv->array_builder;
@@ -356,9 +354,7 @@ garrow_array_builder_set_property(GObject *object,
                                   const GValue *value,
                                   GParamSpec *pspec)
 {
-  GArrowArrayBuilderPrivate *priv;
-
-  priv = GARROW_ARRAY_BUILDER_GET_PRIVATE(object);
+  auto priv = GARROW_ARRAY_BUILDER_GET_PRIVATE(object);
 
   switch (prop_id) {
   case PROP_ARRAY_BUILDER:
@@ -387,9 +383,7 @@ garrow_array_builder_get_property(GObject *object,
 static void
 garrow_array_builder_init(GArrowArrayBuilder *builder)
 {
-  GArrowArrayBuilderPrivate *priv;
-
-  priv = GARROW_ARRAY_BUILDER_GET_PRIVATE(builder);
+  auto priv = GARROW_ARRAY_BUILDER_GET_PRIVATE(builder);
   priv->have_ownership = TRUE;
 }
 
@@ -438,9 +432,7 @@ garrow_array_builder_new(const std::shared_ptr<arrow::DataType> &type,
 void
 garrow_array_builder_release_ownership(GArrowArrayBuilder *builder)
 {
-  GArrowArrayBuilderPrivate *priv;
-
-  priv = GARROW_ARRAY_BUILDER_GET_PRIVATE(builder);
+  auto priv = GARROW_ARRAY_BUILDER_GET_PRIVATE(builder);
   priv->have_ownership = FALSE;
 }
 
@@ -555,7 +547,7 @@ garrow_null_array_builder_append_null(GArrowNullArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple nulls at once. It's more efficient than multiple
- * `append_null()` calls.
+ * `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -656,7 +648,7 @@ garrow_boolean_array_builder_append_value(GArrowBooleanArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple values at once. It's more efficient than multiple
- * `append()` and `append_null()` calls.
+ * `append` and `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -708,7 +700,7 @@ garrow_boolean_array_builder_append_null(GArrowBooleanArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple nulls at once. It's more efficient than multiple
- * `append_null()` calls.
+ * `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -814,7 +806,7 @@ garrow_int_array_builder_append_value(GArrowIntArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple values at once. It's more efficient than multiple
- * `append()` and `append_null()` calls.
+ * `append` and `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -864,7 +856,7 @@ garrow_int_array_builder_append_null(GArrowIntArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple nulls at once. It's more efficient than multiple
- * `append_null()` calls.
+ * `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -970,7 +962,7 @@ garrow_uint_array_builder_append_value(GArrowUIntArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple values at once. It's more efficient than multiple
- * `append()` and `append_null()` calls.
+ * `append` and `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -1020,7 +1012,7 @@ garrow_uint_array_builder_append_null(GArrowUIntArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple nulls at once. It's more efficient than multiple
- * `append_null()` calls.
+ * `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -1121,7 +1113,7 @@ garrow_int8_array_builder_append_value(GArrowInt8ArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple values at once. It's more efficient than multiple
- * `append()` and `append_null()` calls.
+ * `append` and `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -1169,7 +1161,7 @@ garrow_int8_array_builder_append_null(GArrowInt8ArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple nulls at once. It's more efficient than multiple
- * `append_null()` calls.
+ * `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -1270,7 +1262,7 @@ garrow_uint8_array_builder_append_value(GArrowUInt8ArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple values at once. It's more efficient than multiple
- * `append()` and `append_null()` calls.
+ * `append` and `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -1318,7 +1310,7 @@ garrow_uint8_array_builder_append_null(GArrowUInt8ArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple nulls at once. It's more efficient than multiple
- * `append_null()` calls.
+ * `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -1419,7 +1411,7 @@ garrow_int16_array_builder_append_value(GArrowInt16ArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple values at once. It's more efficient than multiple
- * `append()` and `append_null()` calls.
+ * `append` and `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -1467,7 +1459,7 @@ garrow_int16_array_builder_append_null(GArrowInt16ArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple nulls at once. It's more efficient than multiple
- * `append_null()` calls.
+ * `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -1568,7 +1560,7 @@ garrow_uint16_array_builder_append_value(GArrowUInt16ArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple values at once. It's more efficient than multiple
- * `append()` and `append_null()` calls.
+ * `append` and `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -1616,7 +1608,7 @@ garrow_uint16_array_builder_append_null(GArrowUInt16ArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple nulls at once. It's more efficient than multiple
- * `append_null()` calls.
+ * `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -1717,7 +1709,7 @@ garrow_int32_array_builder_append_value(GArrowInt32ArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple values at once. It's more efficient than multiple
- * `append()` and `append_null()` calls.
+ * `append` and `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -1765,7 +1757,7 @@ garrow_int32_array_builder_append_null(GArrowInt32ArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple nulls at once. It's more efficient than multiple
- * `append_null()` calls.
+ * `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -1866,7 +1858,7 @@ garrow_uint32_array_builder_append_value(GArrowUInt32ArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple values at once. It's more efficient than multiple
- * `append()` and `append_null()` calls.
+ * `append` and `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -1914,7 +1906,7 @@ garrow_uint32_array_builder_append_null(GArrowUInt32ArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple nulls at once. It's more efficient than multiple
- * `append_null()` calls.
+ * `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -2015,7 +2007,7 @@ garrow_int64_array_builder_append_value(GArrowInt64ArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple values at once. It's more efficient than multiple
- * `append()` and `append_null()` calls.
+ * `append` and `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -2063,7 +2055,7 @@ garrow_int64_array_builder_append_null(GArrowInt64ArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple nulls at once. It's more efficient than multiple
- * `append_null()` calls.
+ * `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -2164,7 +2156,7 @@ garrow_uint64_array_builder_append_value(GArrowUInt64ArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple values at once. It's more efficient than multiple
- * `append()` and `append_null()` calls.
+ * `append` and `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -2212,7 +2204,7 @@ garrow_uint64_array_builder_append_null(GArrowUInt64ArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple nulls at once. It's more efficient than multiple
- * `append_null()` calls.
+ * `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -2313,7 +2305,7 @@ garrow_float_array_builder_append_value(GArrowFloatArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple values at once. It's more efficient than multiple
- * `append()` and `append_null()` calls.
+ * `append` and `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -2361,7 +2353,7 @@ garrow_float_array_builder_append_null(GArrowFloatArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple nulls at once. It's more efficient than multiple
- * `append_null()` calls.
+ * `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -2462,7 +2454,7 @@ garrow_double_array_builder_append_value(GArrowDoubleArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple values at once. It's more efficient than multiple
- * `append()` and `append_null()` calls.
+ * `append` and `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -2510,7 +2502,7 @@ garrow_double_array_builder_append_null(GArrowDoubleArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple nulls at once. It's more efficient than multiple
- * `append_null()` calls.
+ * `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -2613,7 +2605,7 @@ garrow_binary_array_builder_append_value(GArrowBinaryArrayBuilder *builder,
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
- * Since: 1.0.0
+ * Since: 0.16.0
  */
 gboolean
 garrow_binary_array_builder_append_value_bytes(GArrowBinaryArrayBuilder *builder,
@@ -2646,11 +2638,11 @@ garrow_binary_array_builder_append_value_bytes(GArrowBinaryArrayBuilder *builder
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple values at once. It's more efficient than multiple
- * `append()` and `append_null()` calls.
+ * `append` and `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
- * Since: 1.0.0
+ * Since: 0.16.0
  */
 gboolean
 garrow_binary_array_builder_append_values(GArrowBinaryArrayBuilder *builder,
@@ -2695,7 +2687,7 @@ garrow_binary_array_builder_append_null(GArrowBinaryArrayBuilder *builder,
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
- * Since: 1.0.0
+ * Since: 0.16.0
  */
 gboolean
 garrow_binary_array_builder_append_nulls(GArrowBinaryArrayBuilder *builder,
@@ -2729,7 +2721,7 @@ garrow_large_binary_array_builder_class_init(GArrowLargeBinaryArrayBuilderClass 
  *
  * Returns: A newly created #GArrowLargeBinaryArrayBuilder.
  *
- * Since: 1.0.0
+ * Since: 0.16.0
  */
 GArrowLargeBinaryArrayBuilder *
 garrow_large_binary_array_builder_new(void)
@@ -2749,7 +2741,7 @@ garrow_large_binary_array_builder_new(void)
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
- * Since: 1.0.0
+ * Since: 0.16.0
  */
 gboolean
 garrow_large_binary_array_builder_append_value(GArrowLargeBinaryArrayBuilder *builder,
@@ -2775,7 +2767,7 @@ garrow_large_binary_array_builder_append_value(GArrowLargeBinaryArrayBuilder *bu
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
- * Since: 1.0.0
+ * Since: 0.16.0
  */
 gboolean
 garrow_large_binary_array_builder_append_value_bytes(GArrowLargeBinaryArrayBuilder *builder,
@@ -2808,11 +2800,11 @@ garrow_large_binary_array_builder_append_value_bytes(GArrowLargeBinaryArrayBuild
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple values at once. It's more efficient than multiple
- * `append()` and `append_null()` calls.
+ * `append` and `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
- * Since: 1.0.0
+ * Since: 0.16.0
  */
 gboolean
 garrow_large_binary_array_builder_append_values(GArrowLargeBinaryArrayBuilder *builder,
@@ -2839,7 +2831,7 @@ garrow_large_binary_array_builder_append_values(GArrowLargeBinaryArrayBuilder *b
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
- * Since: 1.0.0
+ * Since: 0.16.0
  */
 gboolean
 garrow_large_binary_array_builder_append_null(GArrowLargeBinaryArrayBuilder *builder,
@@ -2859,7 +2851,7 @@ garrow_large_binary_array_builder_append_null(GArrowLargeBinaryArrayBuilder *bui
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
- * Since: 1.0.0
+ * Since: 0.16.0
  */
 gboolean
 garrow_large_binary_array_builder_append_nulls(GArrowLargeBinaryArrayBuilder *builder,
@@ -2950,7 +2942,7 @@ garrow_string_array_builder_append_value(GArrowStringArrayBuilder *builder,
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
- * Since: 1.0.0
+ * Since: 0.16.0
  */
 gboolean
 garrow_string_array_builder_append_string(GArrowStringArrayBuilder *builder,
@@ -2981,7 +2973,7 @@ garrow_string_array_builder_append_string(GArrowStringArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple values at once. It's more efficient than multiple
- * `append()` and `append_null()` calls.
+ * `append` and `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -3019,11 +3011,11 @@ garrow_string_array_builder_append_values(GArrowStringArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple values at once. It's more efficient than multiple
- * `append()` and `append_null()` calls.
+ * `append` and `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
- * Since: 1.0.0
+ * Since: 0.16.0
  */
 gboolean
 garrow_string_array_builder_append_strings(GArrowStringArrayBuilder *builder,
@@ -3063,7 +3055,7 @@ garrow_large_string_array_builder_class_init(GArrowLargeStringArrayBuilderClass 
  *
  * Returns: A newly created #GArrowLargeStringArrayBuilder.
  *
- * Since: 1.0.0
+ * Since: 0.16.0
  */
 GArrowLargeStringArrayBuilder *
 garrow_large_string_array_builder_new(void)
@@ -3082,7 +3074,7 @@ garrow_large_string_array_builder_new(void)
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
- * Since: 1.0.0
+ * Since: 0.16.0
  */
 gboolean
 garrow_large_string_array_builder_append_string(GArrowLargeStringArrayBuilder *builder,
@@ -3111,11 +3103,11 @@ garrow_large_string_array_builder_append_string(GArrowLargeStringArrayBuilder *b
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple values at once. It's more efficient than multiple
- * `append()` and `append_null()` calls.
+ * `append` and `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
- * Since: 1.0.0
+ * Since: 0.16.0
  */
 gboolean
 garrow_large_string_array_builder_append_strings(GArrowLargeStringArrayBuilder *builder,
@@ -3223,7 +3215,7 @@ garrow_date32_array_builder_append_value(GArrowDate32ArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple values at once. It's more efficient than multiple
- * `append()` and `append_null()` calls.
+ * `append` and `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -3273,7 +3265,7 @@ garrow_date32_array_builder_append_null(GArrowDate32ArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple nulls at once. It's more efficient than multiple
- * `append_null()` calls.
+ * `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -3379,7 +3371,7 @@ garrow_date64_array_builder_append_value(GArrowDate64ArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple values at once. It's more efficient than multiple
- * `append()` and `append_null()` calls.
+ * `append` and `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -3429,7 +3421,7 @@ garrow_date64_array_builder_append_null(GArrowDate64ArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple nulls at once. It's more efficient than multiple
- * `append_null()` calls.
+ * `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -3537,7 +3529,7 @@ garrow_timestamp_array_builder_append_value(GArrowTimestampArrayBuilder *builder
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple values at once. It's more efficient than multiple
- * `append()` and `append_null()` calls.
+ * `append` and `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -3587,7 +3579,7 @@ garrow_timestamp_array_builder_append_null(GArrowTimestampArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple nulls at once. It's more efficient than multiple
- * `append_null()` calls.
+ * `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -3695,7 +3687,7 @@ garrow_time32_array_builder_append_value(GArrowTime32ArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple values at once. It's more efficient than multiple
- * `append()` and `append_null()` calls.
+ * `append` and `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -3745,7 +3737,7 @@ garrow_time32_array_builder_append_null(GArrowTime32ArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple nulls at once. It's more efficient than multiple
- * `append_null()` calls.
+ * `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -3853,7 +3845,7 @@ garrow_time64_array_builder_append_value(GArrowTime64ArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple values at once. It's more efficient than multiple
- * `append()` and `append_null()` calls.
+ * `append` and `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -3903,7 +3895,7 @@ garrow_time64_array_builder_append_null(GArrowTime64ArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple nulls at once. It's more efficient than multiple
- * `append_null()` calls.
+ * `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
@@ -3938,9 +3930,7 @@ G_DEFINE_TYPE_WITH_PRIVATE(GArrowListArrayBuilder,
 static void
 garrow_list_array_builder_dispose(GObject *object)
 {
-  GArrowListArrayBuilderPrivate *priv;
-
-  priv = GARROW_LIST_ARRAY_BUILDER_GET_PRIVATE(object);
+  auto priv = GARROW_LIST_ARRAY_BUILDER_GET_PRIVATE(object);
 
   if (priv->value_builder) {
     g_object_unref(priv->value_builder);
@@ -4130,9 +4120,7 @@ garrow_list_array_builder_append_null(GArrowListArrayBuilder *builder,
 GArrowArrayBuilder *
 garrow_list_array_builder_get_value_builder(GArrowListArrayBuilder *builder)
 {
-  GArrowListArrayBuilderPrivate *priv;
-
-  priv = GARROW_LIST_ARRAY_BUILDER_GET_PRIVATE(builder);
+  auto priv = GARROW_LIST_ARRAY_BUILDER_GET_PRIVATE(builder);
   if (!priv->value_builder) {
     auto arrow_builder =
       static_cast<arrow::ListBuilder *>(
@@ -4191,7 +4179,7 @@ garrow_large_list_array_builder_class_init(GArrowLargeListArrayBuilderClass *kla
  *
  * Returns: A newly created #GArrowLargeListArrayBuilder.
  *
- * Since: 1.0.0
+ * Since: 0.16.0
  */
 GArrowLargeListArrayBuilder *
 garrow_large_list_array_builder_new(GArrowLargeListDataType *data_type,
@@ -4226,7 +4214,7 @@ garrow_large_list_array_builder_new(GArrowLargeListDataType *data_type,
  * specified to constructor. You can get `value_builder` by
  * garrow_large_list_array_builder_get_value_builder().
  *
- * Since: 1.0.0
+ * Since: 0.16.0
  */
 gboolean
 garrow_large_list_array_builder_append_value(GArrowLargeListArrayBuilder *builder,
@@ -4249,7 +4237,7 @@ garrow_large_list_array_builder_append_value(GArrowLargeListArrayBuilder *builde
  *
  * It appends a new NULL element.
  *
- * Since: 1.0.0
+ * Since: 0.16.0
  */
 gboolean
 garrow_large_list_array_builder_append_null(GArrowLargeListArrayBuilder *builder,
@@ -4267,7 +4255,7 @@ garrow_large_list_array_builder_append_null(GArrowLargeListArrayBuilder *builder
  *
  * Returns: (transfer none): The #GArrowArrayBuilder for values.
  *
- * Since: 1.0.0
+ * Since: 0.16.0
  */
 GArrowArrayBuilder *
 garrow_large_list_array_builder_get_value_builder(GArrowLargeListArrayBuilder *builder)
@@ -4301,12 +4289,9 @@ G_DEFINE_TYPE_WITH_PRIVATE(GArrowStructArrayBuilder,
 static void
 garrow_struct_array_builder_dispose(GObject *object)
 {
-  GArrowStructArrayBuilderPrivate *priv;
-  GList *node;
+  auto priv = GARROW_STRUCT_ARRAY_BUILDER_GET_PRIVATE(object);
 
-  priv = GARROW_STRUCT_ARRAY_BUILDER_GET_PRIVATE(object);
-
-  for (node = priv->field_builders; node; node = g_list_next(node)) {
+  for (auto node = priv->field_builders; node; node = g_list_next(node)) {
     auto field_builder = static_cast<GArrowArrayBuilder *>(node->data);
     GArrowArrayBuilderPrivate *field_builder_priv;
 
@@ -4468,9 +4453,7 @@ garrow_struct_array_builder_get_field_builder(GArrowStructArrayBuilder *builder,
 GList *
 garrow_struct_array_builder_get_field_builders(GArrowStructArrayBuilder *builder)
 {
-  GArrowStructArrayBuilderPrivate *priv;
-
-  priv = GARROW_STRUCT_ARRAY_BUILDER_GET_PRIVATE(builder);
+  auto priv = GARROW_STRUCT_ARRAY_BUILDER_GET_PRIVATE(builder);
   if (!priv->field_builders) {
     auto arrow_struct_builder =
       static_cast<arrow::StructBuilder *>(
@@ -4548,7 +4531,7 @@ garrow_map_array_builder_class_init(GArrowMapArrayBuilderClass *klass)
  * Returns: (nullable): A newly created #GArrowMapArrayBuilder on success,
  *   %NULL on error.
  *
- * Since: 1.0.0
+ * Since: 0.17.0
  */
 GArrowMapArrayBuilder *
 garrow_map_array_builder_new(GArrowMapDataType *data_type,
@@ -4580,7 +4563,7 @@ garrow_map_array_builder_new(GArrowMapDataType *data_type,
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
- * Since: 1.0.0
+ * Since: 0.17.0
  */
 gboolean
 garrow_map_array_builder_append_value(GArrowMapArrayBuilder *builder,
@@ -4609,11 +4592,11 @@ garrow_map_array_builder_append_value(GArrowMapArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple values at once. It's more efficient than multiple
- * `append()` and `append_null()` calls.
+ * `append` and `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
- * Since: 1.0.0
+ * Since: 0.17.0
  */
 gboolean
 garrow_map_array_builder_append_values(GArrowMapArrayBuilder *builder,
@@ -4640,7 +4623,7 @@ garrow_map_array_builder_append_values(GArrowMapArrayBuilder *builder,
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
- * Since: 1.0.0
+ * Since: 0.17.0
  */
 gboolean
 garrow_map_array_builder_append_null(GArrowMapArrayBuilder *builder,
@@ -4659,11 +4642,11 @@ garrow_map_array_builder_append_null(GArrowMapArrayBuilder *builder,
  * @error: (nullable): Return location for a #GError or %NULL.
  *
  * Append multiple nulls at once. It's more efficient than multiple
- * `append_null()` calls.
+ * `append_null` calls.
  *
  * Returns: %TRUE on success, %FALSE if there was an error.
  *
- * Since: 1.0.0
+ * Since: 0.17.0
  */
 gboolean
 garrow_map_array_builder_append_nulls(GArrowMapArrayBuilder *builder,
@@ -4683,7 +4666,7 @@ garrow_map_array_builder_append_nulls(GArrowMapArrayBuilder *builder,
  *
  * Returns: (transfer none): The #GArrowArrayBuilder for key values.
  *
- * Since: 1.0.0
+ * Since: 0.17.0
  */
 GArrowArrayBuilder *
 garrow_map_array_builder_get_key_builder(GArrowMapArrayBuilder *builder)
@@ -4706,7 +4689,7 @@ garrow_map_array_builder_get_key_builder(GArrowMapArrayBuilder *builder)
  *
  * Returns: (transfer none): The #GArrowArrayBuilder for item values.
  *
- * Since: 1.0.0
+ * Since: 0.17.0
  */
 GArrowArrayBuilder *
 garrow_map_array_builder_get_item_builder(GArrowMapArrayBuilder *builder)
@@ -4732,7 +4715,7 @@ garrow_map_array_builder_get_item_builder(GArrowMapArrayBuilder *builder)
  *   garrow_map_array_builder_get_item_builder(). You can build map entries as a list of
  *   struct values with this builder.
  *
- * Since: 1.0.0
+ * Since: 0.17.0
  */
 GArrowArrayBuilder *
 garrow_map_array_builder_get_value_builder(GArrowMapArrayBuilder *builder)
@@ -4949,8 +4932,6 @@ garrow_array_builder_new_raw(arrow::ArrayBuilder *arrow_builder,
 arrow::ArrayBuilder *
 garrow_array_builder_get_raw(GArrowArrayBuilder *builder)
 {
-  GArrowArrayBuilderPrivate *priv;
-
-  priv = GARROW_ARRAY_BUILDER_GET_PRIVATE(builder);
+  auto priv = GARROW_ARRAY_BUILDER_GET_PRIVATE(builder);
   return priv->array_builder;
 }

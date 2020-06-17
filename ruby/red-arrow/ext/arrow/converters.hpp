@@ -285,7 +285,8 @@ namespace red_arrow {
     // VISIT(Interval)
     VISIT(List)
     VISIT(Struct)
-    VISIT(Union)
+    VISIT(SparseUnion)
+    VISIT(DenseUnion)
     VISIT(Dictionary)
     VISIT(Decimal128)
     // TODO
@@ -339,9 +340,9 @@ namespace red_arrow {
       index_ = index;
       result_ = rb_hash_new();
       const auto struct_type = array.struct_type();
-      const auto n = struct_type->num_children();
+      const auto n = struct_type->num_fields();
       for (int i = 0; i < n; ++i) {
-        const auto field_type = struct_type->child(i).get();
+        const auto field_type = struct_type->field(i).get();
         const auto& field_name = field_type->name();
         auto key_keep = key_;
         key_ = rb_utf8_str_new(field_name.data(), field_name.length());
@@ -388,7 +389,8 @@ namespace red_arrow {
     // VISIT(Interval)
     VISIT(List)
     VISIT(Struct)
-    VISIT(Union)
+    VISIT(SparseUnion)
+    VISIT(DenseUnion)
     VISIT(Dictionary)
     VISIT(Decimal128)
     // TODO
@@ -432,10 +434,10 @@ namespace red_arrow {
       index_ = index;
       switch (array.mode()) {
       case arrow::UnionMode::SPARSE:
-        convert_sparse(array);
+        convert_sparse(static_cast<const arrow::SparseUnionArray&>(array));
         break;
       case arrow::UnionMode::DENSE:
-        convert_dense(array);
+        convert_dense(static_cast<const arrow::DenseUnionArray&>(array));
         break;
       default:
         rb_raise(rb_eArgError, "Invalid union mode");
@@ -479,7 +481,8 @@ namespace red_arrow {
     // VISIT(Interval)
     VISIT(List)
     VISIT(Struct)
-    VISIT(Union)
+    VISIT(SparseUnion)
+    VISIT(DenseUnion)
     VISIT(Dictionary)
     VISIT(Decimal128)
     // TODO
@@ -501,14 +504,14 @@ namespace red_arrow {
       result_ = result;
     }
 
-    uint8_t compute_child_index(const arrow::UnionArray& array,
+    uint8_t compute_field_index(const arrow::UnionArray& array,
                                 arrow::UnionType* type,
                                 const char* tag) {
       const auto type_code = array.raw_type_codes()[index_];
       if (type_code >= 0 && type_code <= arrow::UnionType::kMaxTypeCode) {
-        const auto child_id = type->child_ids()[type_code];
-        if (child_id >= 0) {
-          return child_id;
+        const auto field_id = type->child_ids()[type_code];
+        if (field_id >= 0) {
+          return field_id;
         }
       }
       check_status(arrow::Status::Invalid("Unknown type ID: ", type_code),
@@ -516,33 +519,33 @@ namespace red_arrow {
       return 0;
     }
 
-    void convert_sparse(const arrow::UnionArray& array) {
+    void convert_sparse(const arrow::SparseUnionArray& array) {
       const auto type =
         std::static_pointer_cast<arrow::UnionType>(array.type()).get();
       const auto tag = "[raw-records][union-sparse-array]";
-      const auto child_index = compute_child_index(array, type, tag);
-      const auto child_field = type->child(child_index).get();
-      const auto& field_name = child_field->name();
+      const auto index = compute_field_index(array, type, tag);
+      const auto field = type->field(index).get();
+      const auto& field_name = field->name();
       const auto field_name_keep = field_name_;
       field_name_ = rb_utf8_str_new(field_name.data(), field_name.length());
-      const auto child_array = array.child(child_index).get();
-      check_status(child_array->Accept(this), tag);
+      const auto field_array = array.field(index).get();
+      check_status(field_array->Accept(this), tag);
       field_name_ = field_name_keep;
     }
 
-    void convert_dense(const arrow::UnionArray& array) {
+    void convert_dense(const arrow::DenseUnionArray& array) {
       const auto type =
         std::static_pointer_cast<arrow::UnionType>(array.type()).get();
       const auto tag = "[raw-records][union-dense-array]";
-      const auto child_index = compute_child_index(array, type, tag);
-      const auto child_field = type->child(child_index).get();
-      const auto& field_name = child_field->name();
+      const auto index = compute_field_index(array, type, tag);
+      const auto field = type->field(index).get();
+      const auto& field_name = field->name();
       const auto field_name_keep = field_name_;
       field_name_ = rb_utf8_str_new(field_name.data(), field_name.length());
-      const auto child_array = array.child(child_index);
+      const auto field_array = array.field(index);
       const auto index_keep = index_;
       index_ = array.value_offset(index_);
-      check_status(child_array->Accept(this), tag);
+      check_status(field_array->Accept(this), tag);
       index_ = index_keep;
       field_name_ = field_name_keep;
     }

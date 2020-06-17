@@ -69,6 +69,7 @@
 #include "arrow/io/util_internal.h"
 #include "arrow/result.h"
 #include "arrow/status.h"
+#include "arrow/util/checked_cast.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/windows_fixup.h"
 
@@ -88,6 +89,7 @@ using ::arrow::fs::internal::FromAwsDatetime;
 using ::arrow::fs::internal::FromAwsString;
 using ::arrow::fs::internal::IsAlreadyExists;
 using ::arrow::fs::internal::IsNotFound;
+using ::arrow::fs::internal::OutcomeToResult;
 using ::arrow::fs::internal::OutcomeToStatus;
 using ::arrow::fs::internal::ToAwsString;
 using ::arrow::fs::internal::ToURLEncodedAwsString;
@@ -168,6 +170,16 @@ void S3Options::ConfigureAccessKey(const std::string& access_key,
       ToAwsString(access_key), ToAwsString(secret_key));
 }
 
+std::string S3Options::GetAccessKey() const {
+  auto credentials = credentials_provider->GetAWSCredentials();
+  return std::string(FromAwsString(credentials.GetAWSAccessKeyId()));
+}
+
+std::string S3Options::GetSecretKey() const {
+  auto credentials = credentials_provider->GetAWSCredentials();
+  return std::string(FromAwsString(credentials.GetAWSSecretKey()));
+}
+
 S3Options S3Options::Defaults() {
   S3Options options;
   options.ConfigureDefaultCredentials();
@@ -240,6 +252,13 @@ Result<S3Options> S3Options::FromUri(const std::string& uri_string,
   return FromUri(uri, out_path);
 }
 
+bool S3Options::Equals(const S3Options& other) const {
+  return (region == other.region && endpoint_override == other.endpoint_override &&
+          scheme == other.scheme && background_writes == other.background_writes &&
+          GetAccessKey() == other.GetAccessKey() &&
+          GetSecretKey() == other.GetSecretKey());
+}
+
 namespace {
 
 Status CheckS3Initialized() {
@@ -273,7 +292,16 @@ struct S3Path {
     out->bucket = std::string(src.substr(0, first_sep));
     out->key = std::string(src.substr(first_sep + 1));
     out->key_parts = internal::SplitAbstractPath(out->key);
-    return internal::ValidateAbstractPathParts(out->key_parts);
+    return Validate(out);
+  }
+
+  static Status Validate(S3Path* path) {
+    auto result = internal::ValidateAbstractPathParts(path->key_parts);
+    if (!result.ok()) {
+      return Status::Invalid(result.message(), " in path ", path->full_path);
+    } else {
+      return result;
+    }
   }
 
   Aws::String ToURLEncodedAwsString() const {
@@ -332,14 +360,35 @@ std::string FormatRange(int64_t start, int64_t length) {
   return ss.str();
 }
 
-Status GetObjectRange(Aws::S3::S3Client* client, const S3Path& path, int64_t start,
-                      int64_t length, S3Model::GetObjectResult* out) {
+// A non-copying iostream.
+// See https://stackoverflow.com/questions/35322033/aws-c-sdk-uploadpart-times-out
+// https://stackoverflow.com/questions/13059091/creating-an-input-stream-from-constant-memory
+class StringViewStream : Aws::Utils::Stream::PreallocatedStreamBuf, public std::iostream {
+ public:
+  StringViewStream(const void* data, int64_t nbytes)
+      : Aws::Utils::Stream::PreallocatedStreamBuf(
+            reinterpret_cast<unsigned char*>(const_cast<void*>(data)),
+            static_cast<size_t>(nbytes)),
+        std::iostream(this) {}
+};
+
+// By default, the AWS SDK reads object data into an auto-growing StringStream.
+// To avoid copies, read directly into our preallocated buffer instead.
+// See https://github.com/aws/aws-sdk-cpp/issues/64 for an alternative but
+// functionally similar recipe.
+Aws::IOStreamFactory AwsWriteableStreamFactory(void* data, int64_t nbytes) {
+  return [=]() { return new StringViewStream(data, nbytes); };
+}
+
+Result<S3Model::GetObjectResult> GetObjectRange(Aws::S3::S3Client* client,
+                                                const S3Path& path, int64_t start,
+                                                int64_t length, void* out) {
   S3Model::GetObjectRequest req;
   req.SetBucket(ToAwsString(path.bucket));
   req.SetKey(ToAwsString(path.key));
   req.SetRange(ToAwsString(FormatRange(start, length)));
-  ARROW_AWS_ASSIGN_OR_RAISE(*out, client->GetObject(req));
-  return Status::OK();
+  req.SetResponseStreamFactory(AwsWriteableStreamFactory(out, length));
+  return OutcomeToResult(client->GetObject(req));
 }
 
 // A RandomAccessFile that reads from a S3 object
@@ -425,11 +474,11 @@ class ObjectInputFile : public io::RandomAccessFile {
     }
 
     // Read the desired range of bytes
-    S3Model::GetObjectResult result;
-    RETURN_NOT_OK(GetObjectRange(client_, path_, position, nbytes, &result));
+    ARROW_ASSIGN_OR_RAISE(S3Model::GetObjectResult result,
+                          GetObjectRange(client_, path_, position, nbytes, out));
 
     auto& stream = result.GetBody();
-    stream.read(reinterpret_cast<char*>(out), nbytes);
+    stream.ignore(nbytes);
     // NOTE: the stream is a stringstream by default, there is no actual error
     // to check for.  However, stream.fail() may return true if EOF is reached.
     return stream.gcount();
@@ -442,15 +491,14 @@ class ObjectInputFile : public io::RandomAccessFile {
     // No need to allocate more than the remaining number of bytes
     nbytes = std::min(nbytes, content_length_ - position);
 
-    std::shared_ptr<ResizableBuffer> buf;
-    RETURN_NOT_OK(AllocateResizableBuffer(nbytes, &buf));
+    ARROW_ASSIGN_OR_RAISE(auto buf, AllocateResizableBuffer(nbytes));
     if (nbytes > 0) {
       ARROW_ASSIGN_OR_RAISE(int64_t bytes_read,
                             ReadAt(position, nbytes, buf->mutable_data()));
       DCHECK_LE(bytes_read, nbytes);
       RETURN_NOT_OK(buf->Resize(bytes_read));
     }
-    return buf;
+    return std::move(buf);
   }
 
   Result<int64_t> Read(int64_t nbytes, void* out) override {
@@ -462,7 +510,7 @@ class ObjectInputFile : public io::RandomAccessFile {
   Result<std::shared_ptr<Buffer>> Read(int64_t nbytes) override {
     ARROW_ASSIGN_OR_RAISE(auto buffer, ReadAt(pos_, nbytes));
     pos_ += buffer->size();
-    return buffer;
+    return std::move(buffer);
   }
 
  protected:
@@ -471,19 +519,6 @@ class ObjectInputFile : public io::RandomAccessFile {
   bool closed_ = false;
   int64_t pos_ = 0;
   int64_t content_length_ = -1;
-};
-
-// A non-copying istream.
-// See https://stackoverflow.com/questions/35322033/aws-c-sdk-uploadpart-times-out
-// https://stackoverflow.com/questions/13059091/creating-an-input-stream-from-constant-memory
-
-class StringViewStream : Aws::Utils::Stream::PreallocatedStreamBuf, public std::iostream {
- public:
-  StringViewStream(const void* data, int64_t nbytes)
-      : Aws::Utils::Stream::PreallocatedStreamBuf(
-            reinterpret_cast<unsigned char*>(const_cast<void*>(data)),
-            static_cast<size_t>(nbytes)),
-        std::iostream(this) {}
 };
 
 // Minimum size for each part of a multipart upload, except for the last part.
@@ -617,21 +652,6 @@ class ObjectOutputStream : public io::OutputStream {
       return Status::Invalid("Operation on closed stream");
     }
 
-    // With up to 10000 parts in an upload (S3 limit), a stream writing chunks
-    // of exactly 5MB would be limited to 50GB total.  To avoid that, we bump
-    // the upload threshold every 100 parts.  So the pattern is:
-    // - part 1 to 99: 5MB threshold
-    // - part 100 to 199: 10MB threshold
-    // - part 200 to 299: 15MB threshold
-    // ...
-    // - part 9900 to 9999: 500MB threshold
-    // So the total size limit is 2475000MB or ~2.4TB, while keeping manageable
-    // chunk sizes and avoiding too much buffering in the common case of a small-ish
-    // stream.  If the limit's not enough, we can revisit.
-    if (part_number_ % 100 == 0) {
-      part_upload_threshold_ += kMinimumPartUpload;
-    }
-
     if (!current_part_ && nbytes >= part_upload_threshold_) {
       // No current part and data large enough, upload it directly
       // (without copying if the buffer is owned)
@@ -705,7 +725,7 @@ class ObjectOutputStream : public io::OutputStream {
 
       // If the data isn't owned, make an immutable copy for the lifetime of the closure
       if (owned_buffer == nullptr) {
-        RETURN_NOT_OK(AllocateBuffer(nbytes, &owned_buffer));
+        ARROW_ASSIGN_OR_RAISE(owned_buffer, AllocateBuffer(nbytes));
         memcpy(owned_buffer->mutable_data(), data, nbytes);
       } else {
         DCHECK_EQ(data, owned_buffer->data());
@@ -733,7 +753,23 @@ class ObjectOutputStream : public io::OutputStream {
       ++upload_state_->parts_in_progress;
       client_->UploadPartAsync(req, handler);
     }
+
     ++part_number_;
+    // With up to 10000 parts in an upload (S3 limit), a stream writing chunks
+    // of exactly 5MB would be limited to 50GB total.  To avoid that, we bump
+    // the upload threshold every 100 parts.  So the pattern is:
+    // - part 1 to 99: 5MB threshold
+    // - part 100 to 199: 10MB threshold
+    // - part 200 to 299: 15MB threshold
+    // ...
+    // - part 9900 to 9999: 500MB threshold
+    // So the total size limit is 2475000MB or ~2.4TB, while keeping manageable
+    // chunk sizes and avoiding too much buffering in the common case of a small-ish
+    // stream.  If the limit's not enough, we can revisit.
+    if (part_number_ % 100 == 0) {
+      part_upload_threshold_ += kMinimumPartUpload;
+    }
+
     return Status::OK();
   }
 
@@ -786,17 +822,17 @@ class ObjectOutputStream : public io::OutputStream {
   std::shared_ptr<UploadState> upload_state_;
 };
 
-// This function assumes st->path() is already set
-void FileObjectToStats(const S3Model::HeadObjectResult& obj, FileStats* st) {
-  st->set_type(FileType::File);
-  st->set_size(static_cast<int64_t>(obj.GetContentLength()));
-  st->set_mtime(FromAwsDatetime(obj.GetLastModified()));
+// This function assumes info->path() is already set
+void FileObjectToInfo(const S3Model::HeadObjectResult& obj, FileInfo* info) {
+  info->set_type(FileType::File);
+  info->set_size(static_cast<int64_t>(obj.GetContentLength()));
+  info->set_mtime(FromAwsDatetime(obj.GetLastModified()));
 }
 
-void FileObjectToStats(const S3Model::Object& obj, FileStats* st) {
-  st->set_type(FileType::File);
-  st->set_size(static_cast<int64_t>(obj.GetSize()));
-  st->set_mtime(FromAwsDatetime(obj.GetLastModified()));
+void FileObjectToInfo(const S3Model::Object& obj, FileInfo* info) {
+  info->set_type(FileType::File);
+  info->set_size(static_cast<int64_t>(obj.GetSize()));
+  info->set_mtime(FromAwsDatetime(obj.GetLastModified()));
 }
 
 }  // namespace
@@ -835,6 +871,8 @@ class S3FileSystem::Impl {
                               use_virtual_addressing));
     return Status::OK();
   }
+
+  S3Options options() const { return options_; }
 
   // Create a bucket.  Successful if bucket already exists.
   Status CreateBucket(const std::string& bucket) {
@@ -971,14 +1009,13 @@ class S3FileSystem::Impl {
 
   // Recursive workhorse for GetTargetStats(FileSelector...)
   Status Walk(const FileSelector& select, const std::string& bucket,
-              const std::string& key, std::vector<FileStats>* out) {
+              const std::string& key, std::vector<FileInfo>* out) {
     int32_t nesting_depth = 0;
     return Walk(select, bucket, key, nesting_depth, out);
   }
 
   Status Walk(const FileSelector& select, const std::string& bucket,
-              const std::string& key, int32_t nesting_depth,
-              std::vector<FileStats>* out) {
+              const std::string& key, int32_t nesting_depth, std::vector<FileInfo>* out) {
     if (nesting_depth >= kMaxNestingDepth) {
       return Status::IOError("S3 filesystem tree exceeds maximum nesting depth (",
                              kMaxNestingDepth, ")");
@@ -991,7 +1028,7 @@ class S3FileSystem::Impl {
       // Walk "files"
       for (const auto& obj : result.GetContents()) {
         is_empty = false;
-        FileStats st;
+        FileInfo info;
         const auto child_key = internal::RemoveTrailingSlash(FromAwsString(obj.GetKey()));
         if (child_key == util::string_view(key)) {
           // Amazon can return the "directory" key itself as part of the results, skip
@@ -999,9 +1036,9 @@ class S3FileSystem::Impl {
         }
         std::stringstream child_path;
         child_path << bucket << kSep << child_key;
-        st.set_path(child_path.str());
-        FileObjectToStats(obj, &st);
-        out->push_back(std::move(st));
+        info.set_path(child_path.str());
+        FileObjectToInfo(obj, &info);
+        out->push_back(std::move(info));
       }
       // Walk "directories"
       for (const auto& prefix : result.GetCommonPrefixes()) {
@@ -1010,10 +1047,10 @@ class S3FileSystem::Impl {
             internal::RemoveTrailingSlash(FromAwsString(prefix.GetPrefix()));
         std::stringstream ss;
         ss << bucket << kSep << child_key;
-        FileStats st;
-        st.set_path(ss.str());
-        st.set_type(FileType::Directory);
-        out->push_back(std::move(st));
+        FileInfo info;
+        info.set_path(ss.str());
+        info.set_type(FileType::Directory);
+        out->push_back(std::move(info));
         if (select.recursive) {
           child_keys.emplace_back(child_key);
         }
@@ -1022,7 +1059,7 @@ class S3FileSystem::Impl {
     };
 
     auto handle_error = [&](const AWSError<S3Errors>& error) -> Status {
-      if (select.allow_non_existent && IsNotFound(error)) {
+      if (select.allow_not_found && IsNotFound(error)) {
         return Status::OK();
       }
       return ErrorToStatus(std::forward_as_tuple("When listing objects under key '", key,
@@ -1041,8 +1078,8 @@ class S3FileSystem::Impl {
     }
 
     // If no contents were found, perhaps it's an empty "directory",
-    // or perhaps it's a non-existent entry.  Check.
-    if (is_empty && !select.allow_non_existent) {
+    // or perhaps it's a nonexistent entry.  Check.
+    if (is_empty && !select.allow_not_found) {
       RETURN_NOT_OK(IsEmptyDirectory(bucket, key, &is_empty));
       if (!is_empty) {
         return PathNotFound(bucket, key);
@@ -1145,7 +1182,9 @@ class S3FileSystem::Impl {
     }
     // First delete all "files", then delete all child "directories"
     RETURN_NOT_OK(DeleteObjects(bucket, file_keys));
-    // XXX This doesn't seem necessary on Minio
+    // Delete directories in reverse lexicographic order, to ensure children
+    // are deleted before their parents (Minio).
+    std::sort(dir_keys.rbegin(), dir_keys.rend());
     return DeleteObjects(bucket, dir_keys);
   }
 
@@ -1189,16 +1228,29 @@ Result<std::shared_ptr<S3FileSystem>> S3FileSystem::Make(const S3Options& option
   return ptr;
 }
 
-Result<FileStats> S3FileSystem::GetTargetStats(const std::string& s) {
+bool S3FileSystem::Equals(const FileSystem& other) const {
+  if (this == &other) {
+    return true;
+  }
+  if (other.type_name() != type_name()) {
+    return false;
+  }
+  const auto& s3fs = ::arrow::internal::checked_cast<const S3FileSystem&>(other);
+  return options().Equals(s3fs.options());
+}
+
+S3Options S3FileSystem::options() const { return impl_->options(); }
+
+Result<FileInfo> S3FileSystem::GetFileInfo(const std::string& s) {
   S3Path path;
   RETURN_NOT_OK(S3Path::FromString(s, &path));
-  FileStats st;
-  st.set_path(s);
+  FileInfo info;
+  info.set_path(s);
 
   if (path.empty()) {
     // It's the root path ""
-    st.set_type(FileType::Directory);
-    return st;
+    info.set_type(FileType::Directory);
+    return info;
   } else if (path.key.empty()) {
     // It's a bucket
     S3Model::HeadBucketRequest req;
@@ -1212,13 +1264,13 @@ Result<FileStats> S3FileSystem::GetTargetStats(const std::string& s) {
                                   "': "),
             outcome.GetError());
       }
-      st.set_type(FileType::NonExistent);
-      return st;
+      info.set_type(FileType::NotFound);
+      return info;
     }
     // NOTE: S3 doesn't have a bucket modification time.  Only a creation
     // time is available, and you have to list all buckets to get it.
-    st.set_type(FileType::Directory);
-    return st;
+    info.set_type(FileType::Directory);
+    return info;
   } else {
     // It's an object
     S3Model::HeadObjectRequest req;
@@ -1228,8 +1280,8 @@ Result<FileStats> S3FileSystem::GetTargetStats(const std::string& s) {
     auto outcome = impl_->client_->HeadObject(req);
     if (outcome.IsSuccess()) {
       // "File" object found
-      FileObjectToStats(outcome.GetResult(), &st);
-      return st;
+      FileObjectToInfo(outcome.GetResult(), &info);
+      return info;
     }
     if (!IsNotFound(outcome.GetError())) {
       return ErrorToStatus(
@@ -1241,35 +1293,35 @@ Result<FileStats> S3FileSystem::GetTargetStats(const std::string& s) {
     bool is_dir = false;
     RETURN_NOT_OK(impl_->IsEmptyDirectory(path, &is_dir));
     if (is_dir) {
-      st.set_type(FileType::Directory);
-      return st;
+      info.set_type(FileType::Directory);
+      return info;
     }
     // Not found => perhaps it's a non-empty "directory"
     RETURN_NOT_OK(impl_->IsNonEmptyDirectory(path, &is_dir));
     if (is_dir) {
-      st.set_type(FileType::Directory);
+      info.set_type(FileType::Directory);
     } else {
-      st.set_type(FileType::NonExistent);
+      info.set_type(FileType::NotFound);
     }
-    return st;
+    return info;
   }
 }
 
-Result<std::vector<FileStats>> S3FileSystem::GetTargetStats(const FileSelector& select) {
+Result<std::vector<FileInfo>> S3FileSystem::GetFileInfo(const FileSelector& select) {
   S3Path base_path;
   RETURN_NOT_OK(S3Path::FromString(select.base_dir, &base_path));
 
-  std::vector<FileStats> results;
+  std::vector<FileInfo> results;
 
   if (base_path.empty()) {
     // List all buckets
     std::vector<std::string> buckets;
     RETURN_NOT_OK(impl_->ListBuckets(&buckets));
     for (const auto& bucket : buckets) {
-      FileStats st;
-      st.set_path(bucket);
-      st.set_type(FileType::Directory);
-      results.push_back(std::move(st));
+      FileInfo info;
+      info.set_path(bucket);
+      info.set_type(FileType::Directory);
+      results.push_back(std::move(info));
       if (select.recursive) {
         RETURN_NOT_OK(impl_->Walk(select, bucket, "", &results));
       }

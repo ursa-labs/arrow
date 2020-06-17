@@ -44,15 +44,43 @@ TEST_F(TestInMemoryFragment, Scan) {
   auto reader = ConstantArrayGenerator::Repeat(kNumberBatches, batch);
 
   // Creates a InMemoryFragment of the same repeated batch.
-  auto fragment =
-      InMemoryFragment({static_cast<size_t>(kNumberBatches), batch}, options_);
+  auto fragment = InMemoryFragment({static_cast<size_t>(kNumberBatches), batch});
 
   AssertFragmentEquals(reader.get(), &fragment);
 }
 
-class TestInMemorySource : public DatasetFixtureMixin {};
+class TestInMemoryDataset : public DatasetFixtureMixin {};
 
-TEST_F(TestInMemorySource, GetFragments) {
+TEST_F(TestInMemoryDataset, ReplaceSchema) {
+  constexpr int64_t kBatchSize = 1;
+  constexpr int64_t kNumberBatches = 1;
+
+  SetSchema({field("i32", int32()), field("f64", float64())});
+  auto batch = ConstantArrayGenerator::Zeroes(kBatchSize, schema_);
+  auto reader = ConstantArrayGenerator::Repeat(kNumberBatches, batch);
+
+  auto dataset = std::make_shared<InMemoryDataset>(
+      schema_, RecordBatchVector{static_cast<size_t>(kNumberBatches), batch});
+
+  // drop field
+  ASSERT_OK(dataset->ReplaceSchema(schema({field("i32", int32())})).status());
+  // add field (will be materialized as null during projection)
+  ASSERT_OK(dataset->ReplaceSchema(schema({field("str", utf8())})).status());
+  // incompatible type
+  ASSERT_RAISES(TypeError,
+                dataset->ReplaceSchema(schema({field("i32", utf8())})).status());
+  // incompatible nullability
+  ASSERT_RAISES(
+      TypeError,
+      dataset->ReplaceSchema(schema({field("f64", float64(), /*nullable=*/false)}))
+          .status());
+  // add non-nullable field
+  ASSERT_RAISES(TypeError,
+                dataset->ReplaceSchema(schema({field("str", utf8(), /*nullable=*/false)}))
+                    .status());
+}
+
+TEST_F(TestInMemoryDataset, GetFragments) {
   constexpr int64_t kBatchSize = 1024;
   constexpr int64_t kNumberBatches = 16;
 
@@ -60,18 +88,54 @@ TEST_F(TestInMemorySource, GetFragments) {
   auto batch = ConstantArrayGenerator::Zeroes(kBatchSize, schema_);
   auto reader = ConstantArrayGenerator::Repeat(kNumberBatches, batch);
 
-  RecordBatchVector batches{static_cast<size_t>(kNumberBatches), batch};
-  auto fragment = std::make_shared<InMemoryFragment>(batches, options_);
-  // It is safe to copy fragment multiple time since Scan() does not consume
-  // the internal array.
-  auto source = InMemorySource(schema_, {static_cast<size_t>(kNumberBatches), batch});
+  auto dataset = std::make_shared<InMemoryDataset>(
+      schema_, RecordBatchVector{static_cast<size_t>(kNumberBatches), batch});
 
-  AssertSourceEquals(reader.get(), &source);
+  AssertDatasetEquals(reader.get(), dataset.get());
 }
 
-class TestTreeSource : public DatasetFixtureMixin {};
+class TestUnionDataset : public DatasetFixtureMixin {};
 
-TEST_F(TestTreeSource, GetFragments) {
+TEST_F(TestUnionDataset, ReplaceSchema) {
+  constexpr int64_t kBatchSize = 1;
+  constexpr int64_t kNumberBatches = 1;
+
+  SetSchema({field("i32", int32()), field("f64", float64())});
+  auto batch = ConstantArrayGenerator::Zeroes(kBatchSize, schema_);
+
+  std::vector<std::shared_ptr<RecordBatch>> batches{static_cast<size_t>(kNumberBatches),
+                                                    batch};
+
+  DatasetVector children = {
+      std::make_shared<InMemoryDataset>(schema_, batches),
+      std::make_shared<InMemoryDataset>(schema_, batches),
+  };
+
+  const int64_t total_batches = children.size() * kNumberBatches;
+  auto reader = ConstantArrayGenerator::Repeat(total_batches, batch);
+
+  ASSERT_OK_AND_ASSIGN(auto dataset, UnionDataset::Make(schema_, children));
+  AssertDatasetEquals(reader.get(), dataset.get());
+
+  // drop field
+  ASSERT_OK(dataset->ReplaceSchema(schema({field("i32", int32())})).status());
+  // add nullable field (will be materialized as null during projection)
+  ASSERT_OK(dataset->ReplaceSchema(schema({field("str", utf8())})).status());
+  // incompatible type
+  ASSERT_RAISES(TypeError,
+                dataset->ReplaceSchema(schema({field("i32", utf8())})).status());
+  // incompatible nullability
+  ASSERT_RAISES(
+      TypeError,
+      dataset->ReplaceSchema(schema({field("f64", float64(), /*nullable=*/false)}))
+          .status());
+  // add non-nullable field
+  ASSERT_RAISES(TypeError,
+                dataset->ReplaceSchema(schema({field("str", utf8(), /*nullable=*/false)}))
+                    .status());
+}
+
+TEST_F(TestUnionDataset, GetFragments) {
   constexpr int64_t kBatchSize = 1024;
   constexpr int64_t kChildPerNode = 2;
   constexpr int64_t kCompleteBinaryTreeDepth = 4;
@@ -83,26 +147,30 @@ TEST_F(TestTreeSource, GetFragments) {
   auto reader = ConstantArrayGenerator::Repeat(n_leaves, batch);
 
   // Creates a complete binary tree of depth kCompleteBinaryTreeDepth where the
-  // leaves are InMemorySource containing kChildPerNode fragments.
+  // leaves are InMemoryDataset containing kChildPerNode fragments.
 
-  auto l1_leaf_source = std::make_shared<InMemorySource>(
+  auto l1_leaf_dataset = std::make_shared<InMemoryDataset>(
       schema_, RecordBatchVector{static_cast<size_t>(kChildPerNode), batch});
 
-  auto l2_leaf_tree_source = std::make_shared<TreeSource>(
-      schema_, SourceVector{static_cast<size_t>(kChildPerNode), l1_leaf_source});
+  ASSERT_OK_AND_ASSIGN(
+      auto l2_leaf_tree_dataset,
+      UnionDataset::Make(
+          schema_, DatasetVector{static_cast<size_t>(kChildPerNode), l1_leaf_dataset}));
 
-  auto l3_middle_tree_source = std::make_shared<TreeSource>(
-      schema_, SourceVector{static_cast<size_t>(kChildPerNode), l2_leaf_tree_source});
+  ASSERT_OK_AND_ASSIGN(
+      auto l3_middle_tree_dataset,
+      UnionDataset::Make(schema_, DatasetVector{static_cast<size_t>(kChildPerNode),
+                                                l2_leaf_tree_dataset}));
 
-  auto root_source = std::make_shared<TreeSource>(
-      schema_, SourceVector{static_cast<size_t>(kChildPerNode), l3_middle_tree_source});
+  ASSERT_OK_AND_ASSIGN(
+      auto root_dataset,
+      UnionDataset::Make(schema_, DatasetVector{static_cast<size_t>(kChildPerNode),
+                                                l3_middle_tree_dataset}));
 
-  AssertSourceEquals(reader.get(), root_source.get());
+  AssertDatasetEquals(reader.get(), root_dataset.get());
 }
 
-class TestDataset : public DatasetFixtureMixin {};
-
-TEST_F(TestDataset, TrivialScan) {
+TEST_F(TestUnionDataset, TrivialScan) {
   constexpr int64_t kNumberBatches = 16;
   constexpr int64_t kBatchSize = 1024;
 
@@ -112,16 +180,67 @@ TEST_F(TestDataset, TrivialScan) {
   std::vector<std::shared_ptr<RecordBatch>> batches{static_cast<size_t>(kNumberBatches),
                                                     batch};
 
-  SourceVector sources = {
-      std::make_shared<InMemorySource>(schema_, batches),
-      std::make_shared<InMemorySource>(schema_, batches),
+  DatasetVector children = {
+      std::make_shared<InMemoryDataset>(schema_, batches),
+      std::make_shared<InMemoryDataset>(schema_, batches),
   };
 
-  const int64_t total_batches = sources.size() * kNumberBatches;
+  const int64_t total_batches = children.size() * kNumberBatches;
   auto reader = ConstantArrayGenerator::Repeat(total_batches, batch);
 
-  ASSERT_OK_AND_ASSIGN(auto dataset, Dataset::Make(sources, schema_));
+  ASSERT_OK_AND_ASSIGN(auto dataset, UnionDataset::Make(schema_, children));
   AssertDatasetEquals(reader.get(), dataset.get());
+}
+
+TEST(TestProjector, CheckProjectable) {
+  struct Assert {
+    explicit Assert(FieldVector from) : from_(from) {}
+    Schema from_;
+
+    void ProjectableTo(FieldVector to) {
+      ARROW_EXPECT_OK(CheckProjectable(from_, Schema(to)));
+    }
+
+    void NotProjectableTo(FieldVector to, std::string substr = "") {
+      EXPECT_RAISES_WITH_MESSAGE_THAT(TypeError, testing::HasSubstr(substr),
+                                      CheckProjectable(from_, Schema(to)));
+    }
+  };
+
+  auto i8 = field("i8", int8());
+  auto u16 = field("u16", uint16());
+  auto str = field("str", utf8());
+  auto i8_req = field("i8", int8(), false);
+  auto u16_req = field("u16", uint16(), false);
+  auto str_req = field("str", utf8(), false);
+
+  // trivial
+  Assert({}).ProjectableTo({});
+  Assert({i8}).ProjectableTo({i8});
+  Assert({i8, u16_req}).ProjectableTo({i8, u16_req});
+
+  // reorder
+  Assert({i8, u16}).ProjectableTo({u16, i8});
+  Assert({i8, str, u16}).ProjectableTo({u16, i8, str});
+
+  // drop field(s)
+  Assert({i8}).ProjectableTo({});
+
+  // add field(s)
+  Assert({}).ProjectableTo({i8});
+  Assert({}).ProjectableTo({i8, u16});
+  Assert({}).NotProjectableTo({u16_req},
+                              "is not nullable and does not exist in origin schema");
+  Assert({i8}).NotProjectableTo({u16_req, i8});
+
+  // change nullability
+  Assert({i8}).NotProjectableTo({i8_req},
+                                "not nullable but is not required in origin schema");
+  Assert({i8_req}).ProjectableTo({i8});
+
+  // change field type
+  Assert({i8}).NotProjectableTo({field("i8", utf8())},
+                                "fields had matching names but differing types");
 }
 
 TEST(TestProjector, MismatchedType) {
@@ -146,8 +265,7 @@ TEST(TestProjector, AugmentWithNull) {
 
   RecordBatchProjector projector(to_schema);
 
-  std::shared_ptr<Array> null_i32;
-  ASSERT_OK(MakeArrayOfNull(int32(), batch->num_rows(), &null_i32));
+  ASSERT_OK_AND_ASSIGN(auto null_i32, MakeArrayOfNull(int32(), batch->num_rows()));
   auto expected_batch =
       RecordBatch::Make(to_schema, batch->num_rows(), {null_i32, batch->column(0)});
 
@@ -225,8 +343,8 @@ TEST(TestProjector, NonTrivial) {
   AssertBatchesEqual(*expected_batch, *reconciled_batch);
 }
 
-class TestEndToEnd : public TestDataset {
-  void SetUp() {
+class TestEndToEnd : public TestUnionDataset {
+  void SetUp() override {
     bool nullable = false;
     SetSchema({
         field("region", utf8(), nullable),
@@ -279,7 +397,7 @@ class TestEndToEnd : public TestDataset {
   std::shared_ptr<fs::FileSystem> fs_;
 };
 
-TEST_F(TestEndToEnd, EndToEndSingleSource) {
+TEST_F(TestEndToEnd, EndToEndSingleDataset) {
   // The dataset API is divided in 3 parts:
   //  - Creation
   //  - Querying
@@ -287,24 +405,24 @@ TEST_F(TestEndToEnd, EndToEndSingleSource) {
 
   // Creation.
   //
-  // A Dataset is the union of one or more Sources with the same schema.
-  // Example of Source, FileSystemSource, OdbcSource,
-  // FlightSource.
+  // A Dataset is the union of one or more Datasets with the same schema.
+  // Example of Dataset, FileSystemDataset, OdbcDataset,
+  // FlightDataset.
 
-  // A Source is composed of Fragments. Each Fragment can yield
-  // multiple RecordBatches. Sources can be created manually or "discovered"
-  // via the SourceFactory interface.
-  std::shared_ptr<SourceFactory> factory;
+  // A Dataset is composed of Fragments. Each Fragment can yield
+  // multiple RecordBatches. Datasets can be created manually or "discovered"
+  // via the DatasetFactory interface.
+  std::shared_ptr<DatasetFactory> factory;
 
   // The user must specify which FileFormat is used to create FileFragments.
-  // This option is specific to FileSystemSource (and the builder).
+  // This option is specific to FileSystemDataset (and the builder).
   auto format_schema = SchemaFromColumnNames(schema_, {"region", "model", "sales"});
   auto format = std::make_shared<JSONRecordBatchFileFormat>(format_schema);
 
   // A selector is used to crawl files and directories of a
   // filesystem. If the options in FileSelector are not enough, the
-  // FileSystemSourceFactory class also supports an explicit list of
-  // fs::FileStats instead of the selector.
+  // FileSystemDatasetFactory class also supports an explicit list of
+  // fs::FileInfo instead of the selector.
   fs::FileSelector s;
   s.base_dir = "/dataset";
   s.recursive = true;
@@ -313,10 +431,10 @@ TEST_F(TestEndToEnd, EndToEndSingleSource) {
   // FileSystemFactoryOptions configuration class. See the docstring for more
   // information.
   FileSystemFactoryOptions options;
-  options.ignore_prefixes = {"."};
+  options.selector_ignore_prefixes = {"."};
 
-  // Partitions expressions can be discovered for Source and Fragments.
-  // This metadata is then used in conjuction with the query filter to apply
+  // Partitions expressions can be discovered for Dataset and Fragments.
+  // This metadata is then used in conjunction with the query filter to apply
   // the pushdown predicate optimization.
   //
   // The DirectoryPartitioning is a partitioning where the path is split with
@@ -332,20 +450,22 @@ TEST_F(TestEndToEnd, EndToEndSingleSource) {
   // - "/2019/01/CA/a_file.json -> {"year": 2019, "month": 1, "country": "CA"}
   options.partitioning = DirectoryPartitioning::MakeFactory({"year", "month", "country"});
 
-  ASSERT_OK_AND_ASSIGN(factory, FileSystemSourceFactory::Make(fs_, s, format, options));
+  ASSERT_OK_AND_ASSIGN(factory, FileSystemDatasetFactory::Make(fs_, s, format, options));
 
   // Fragments might have compatible but slightly different schemas, e.g.
   // schema evolved by adding/renaming columns. In this case, the schema is
   // passed to the dataset constructor.
   // The inspected_schema may optionally be modified before being finalized.
-  ASSERT_OK_AND_ASSIGN(auto inspected_schema, factory->Inspect());
+  InspectOptions inspect_options;
+  inspect_options.fragments = InspectOptions::kInspectAllFragments;
+  ASSERT_OK_AND_ASSIGN(auto inspected_schema, factory->Inspect(inspect_options));
   EXPECT_EQ(*schema_, *inspected_schema);
 
-  // Build the Source where partitions are attached to fragments (files).
+  // Build the Dataset where partitions are attached to fragments (files).
   ASSERT_OK_AND_ASSIGN(auto source, factory->Finish(inspected_schema));
 
-  // Create the Dataset from our single Source.
-  ASSERT_OK_AND_ASSIGN(auto dataset, Dataset::Make({source}, inspected_schema));
+  // Create the Dataset from our single Dataset.
+  ASSERT_OK_AND_ASSIGN(auto dataset, UnionDataset::Make(inspected_schema, {source}));
 
   // Querying.
   //
@@ -360,7 +480,7 @@ TEST_F(TestEndToEnd, EndToEndSingleSource) {
   // be materialized if the Fragment supports it. This is the major benefit
   // of using a column-major format versus a row-major format.
   //
-  // This API decouples the Source/Fragment implementation and column
+  // This API decouples the Dataset/Fragment implementation and column
   // projection from the query part.
   //
   // For example, a ParquetFileFragment may read the necessary byte ranges
@@ -371,11 +491,11 @@ TEST_F(TestEndToEnd, EndToEndSingleSource) {
   ASSERT_OK(scanner_builder->Project(columns));
 
   // An optional filter expression may also be specified. The filter expression
-  // is evaluated against input rows. Only rows for which the filter evaluates to true are
-  // yielded. Predicate pushdown optimizations are applied using partition information if
-  // available.
+  // is evaluated against input rows. Only rows for which the filter evaluates to true
+  // are yielded. Predicate pushdown optimizations are applied using partition
+  // information if available.
   //
-  // This API decouples predicate pushdown from the Source implementation
+  // This API decouples predicate pushdown from the Dataset implementation
   // and partition discovery.
   //
   // The following filter tests both predicate pushdown and post filtering
@@ -398,13 +518,21 @@ TEST_F(TestEndToEnd, EndToEndSingleSource) {
   AssertTablesEqual(*expected, *table, false, true);
 }
 
-class TestSchemaUnification : public TestDataset {
+inline std::shared_ptr<Schema> SchemaFromNames(const std::vector<std::string> names) {
+  std::vector<std::shared_ptr<Field>> fields;
+  for (const auto& name : names) {
+    fields.push_back(field(name, int32()));
+  }
+
+  return schema(fields);
+}
+
+class TestSchemaUnification : public TestUnionDataset {
  public:
   using i32 = util::optional<int32_t>;
+  using PathAndContent = std::vector<std::pair<std::string, std::string>>;
 
-  void SetUp() {
-    using PathAndContent = std::vector<std::pair<std::string, std::string>>;
-
+  void SetUp() override {
     // The following test creates 2 sources with divergent but compatible
     // schemas. Each source have a common partitioning where the
     // fields are not materialized in the data fragments.
@@ -421,10 +549,10 @@ class TestSchemaUnification : public TestDataset {
     static constexpr auto ds2_df1 = "/dataset/beta/part_ds=2/part_df=1/data.json";
     static constexpr auto ds2_df2 = "/dataset/beta/part_ds=2/part_df=2/data.json";
     auto files = PathAndContent{
-        // First Source
+        // First Dataset
         {ds1_df1, R"([{"phy_1": 111, "phy_2": 211}])"},
         {ds1_df2, R"([{"phy_2": 212, "phy_3": 312}])"},
-        // Second Source
+        // Second Dataset
         {ds2_df1, R"([{"phy_3": 321, "phy_4": 421}])"},
         {ds2_df2, R"([{"phy_4": 422, "phy_2": 222}])"},
     };
@@ -437,8 +565,8 @@ class TestSchemaUnification : public TestDataset {
 
     auto get_source =
         [this](std::string base,
-               std::vector<std::string> paths) -> Result<std::shared_ptr<Source>> {
-      auto resolver = [this](const FileSource& source) -> std::shared_ptr<Schema> {
+               std::vector<std::string> paths) -> Result<std::shared_ptr<Dataset>> {
+      auto resolver = [](const FileSource& source) -> std::shared_ptr<Schema> {
         auto path = source.path();
         // A different schema for each data fragment.
         if (path == ds1_df1) {
@@ -462,7 +590,7 @@ class TestSchemaUnification : public TestDataset {
           std::make_shared<HivePartitioning>(SchemaFromNames({"part_ds", "part_df"}));
 
       ARROW_ASSIGN_OR_RAISE(auto factory,
-                            FileSystemSourceFactory::Make(fs_, paths, format, options));
+                            FileSystemDatasetFactory::Make(fs_, paths, format, options));
 
       ARROW_ASSIGN_OR_RAISE(auto schema, factory->Inspect());
 
@@ -472,16 +600,16 @@ class TestSchemaUnification : public TestDataset {
     schema_ = SchemaFromNames({"phy_1", "phy_2", "phy_3", "phy_4", "part_ds", "part_df"});
     ASSERT_OK_AND_ASSIGN(auto ds1, get_source("/dataset/alpha", {ds1_df1, ds1_df2}));
     ASSERT_OK_AND_ASSIGN(auto ds2, get_source("/dataset/beta", {ds2_df1, ds2_df2}));
-    ASSERT_OK_AND_ASSIGN(dataset_, Dataset::Make({ds1, ds2}, schema_));
-  }
 
-  std::shared_ptr<Schema> SchemaFromNames(const std::vector<std::string> names) {
-    std::vector<std::shared_ptr<Field>> fields;
-    for (const auto& name : names) {
-      fields.push_back(field(name, int32()));
-    }
-
-    return schema(fields);
+    // FIXME(bkietz) this is a hack: allow differing schemas for the purposes of this
+    // test
+    class DisparateSchemasUnionDataset : public UnionDataset {
+     public:
+      DisparateSchemasUnionDataset(std::shared_ptr<Schema> schema, DatasetVector children)
+          : UnionDataset(std::move(schema), std::move(children)) {}
+    };
+    dataset_ =
+        std::make_shared<DisparateSchemasUnionDataset>(schema_, DatasetVector{ds1, ds2});
   }
 
   template <typename TupleType>
@@ -511,7 +639,7 @@ class TestSchemaUnification : public TestDataset {
   std::shared_ptr<Dataset> dataset_;
 };
 
-using nonstd::nullopt;
+using util::nullopt;
 
 TEST_F(TestSchemaUnification, SelectStar) {
   // This is a `SELECT * FROM dataset` where it ensures:
@@ -627,6 +755,41 @@ TEST_F(TestSchemaUnification, SelectMixedColumnsAndFilter) {
       TupleType(2, nullopt, 2, nullopt),
   };
   AssertBuilderEquals(scan_builder, rows);
+}
+
+TEST(TestDictPartitionColumn, SelectPartitionColumnFilterPhysicalColumn) {
+  auto partition_field = field("part", dictionary(int32(), utf8()));
+  auto path = "/dataset/part=one/data.json";
+
+  auto mock_fs = std::make_shared<fs::internal::MockFileSystem>(fs::kNoTime);
+  ARROW_EXPECT_OK(mock_fs->CreateFile(path, R"([ {"phy_1": 111, "phy_2": 211} ])",
+                                      /* recursive */ true));
+
+  auto physical_schema = SchemaFromNames({"phy_1", "phy_2"});
+  auto format = std::make_shared<JSONRecordBatchFileFormat>(
+      [=](const FileSource&) { return physical_schema; });
+
+  FileSystemFactoryOptions options;
+  options.partition_base_dir = "/dataset";
+  options.partitioning = std::make_shared<HivePartitioning>(schema({partition_field}));
+
+  ASSERT_OK_AND_ASSIGN(auto factory,
+                       FileSystemDatasetFactory::Make(mock_fs, {path}, format, options));
+
+  ASSERT_OK_AND_ASSIGN(auto schema, factory->Inspect());
+
+  ASSERT_OK_AND_ASSIGN(auto dataset, factory->Finish(schema));
+
+  // Selects re-ordered virtual column with a filter on a physical column
+  ASSERT_OK_AND_ASSIGN(auto scan_builder, dataset->NewScan());
+  ASSERT_OK(scan_builder->Filter("phy_1"_ == 111));
+
+  ASSERT_OK(scan_builder->Project({"part"}));
+
+  ASSERT_OK_AND_ASSIGN(auto scanner, scan_builder->Finish());
+  ASSERT_OK_AND_ASSIGN(auto table, scanner->ToTable());
+  AssertArraysEqual(*table->column(0)->chunk(0),
+                    *DictArrayFromJSON(partition_field->type(), "[0]", "[\"one\"]"));
 }
 
 }  // namespace dataset

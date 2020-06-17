@@ -25,6 +25,8 @@
 #include <utility>
 #include <vector>
 
+#include "arrow/filesystem/type_fwd.h"
+#include "arrow/io/type_fwd.h"
 #include "arrow/type_fwd.h"
 #include "arrow/util/compare.h"
 #include "arrow/util/macros.h"
@@ -32,37 +34,12 @@
 #include "arrow/util/windows_fixup.h"
 
 namespace arrow {
-
-namespace io {
-
-class InputStream;
-class LatencyGenerator;
-class OutputStream;
-class RandomAccessFile;
-
-}  // namespace io
-
 namespace fs {
 
 // A system clock time point expressed as a 64-bit (or more) number of
 // nanoseconds since the epoch.
 using TimePoint =
     std::chrono::time_point<std::chrono::system_clock, std::chrono::nanoseconds>;
-
-/// \brief FileSystem entry type
-enum class ARROW_EXPORT FileType : int8_t {
-  /// Entry does not exist
-  NonExistent,
-  /// Entry exists but its type is unknown
-  ///
-  /// This can designate a special file such as a Unix socket or character
-  /// device, or Windows NUL / CON / ...
-  Unknown,
-  /// Entry is a regular file
-  File,
-  /// Entry is a directory
-  Directory
-};
 
 ARROW_EXPORT std::string ToString(FileType);
 
@@ -71,13 +48,13 @@ ARROW_EXPORT std::ostream& operator<<(std::ostream& os, FileType);
 static const int64_t kNoSize = -1;
 static const TimePoint kNoTime = TimePoint(TimePoint::duration(-1));
 
-/// \brief FileSystem entry stats
-struct ARROW_EXPORT FileStats : public util::EqualityComparable<FileStats> {
-  FileStats() = default;
-  FileStats(FileStats&&) = default;
-  FileStats& operator=(FileStats&&) = default;
-  FileStats(const FileStats&) = default;
-  FileStats& operator=(const FileStats&) = default;
+/// \brief FileSystem entry info
+struct ARROW_EXPORT FileInfo : public util::EqualityComparable<FileInfo> {
+  FileInfo() = default;
+  FileInfo(FileInfo&&) = default;
+  FileInfo& operator=(FileInfo&&) = default;
+  FileInfo(const FileInfo&) = default;
+  FileInfo& operator=(const FileInfo&) = default;
 
   /// The file type
   FileType type() const { return type_; }
@@ -109,23 +86,23 @@ struct ARROW_EXPORT FileStats : public util::EqualityComparable<FileStats> {
   bool IsFile() const { return type_ == FileType::File; }
   bool IsDirectory() const { return type_ == FileType::Directory; }
 
-  bool Equals(const FileStats& other) const {
+  bool Equals(const FileInfo& other) const {
     return type() == other.type() && path() == other.path() && size() == other.size() &&
            mtime() == other.mtime();
   }
 
   std::string ToString() const;
 
-  /// Function object implementing less-than comparison and hashing
-  /// by path, to support sorting stats, using them as keys, and other
+  /// Function object implementing less-than comparison and hashing by
+  /// path, to support sorting infos, using them as keys, and other
   /// interactions with the STL.
   struct ByPath {
-    bool operator()(const FileStats& l, const FileStats& r) const {
+    bool operator()(const FileInfo& l, const FileInfo& r) const {
       return l.path() < r.path();
     }
 
-    size_t operator()(const FileStats& s) const {
-      return std::hash<std::string>{}(s.path());
+    size_t operator()(const FileInfo& i) const {
+      return std::hash<std::string>{}(i.path());
     }
   };
 
@@ -136,16 +113,16 @@ struct ARROW_EXPORT FileStats : public util::EqualityComparable<FileStats> {
   TimePoint mtime_ = kNoTime;
 };
 
-ARROW_EXPORT std::ostream& operator<<(std::ostream& os, const FileStats&);
+ARROW_EXPORT std::ostream& operator<<(std::ostream& os, const FileInfo&);
 
 /// \brief File selector for filesystem APIs
 struct ARROW_EXPORT FileSelector {
   /// The directory in which to select files.
   /// If the path exists but doesn't point to a directory, this should be an error.
   std::string base_dir;
-  /// The behavior if `base_dir` doesn't exist in the filesystem.  If false,
+  /// The behavior if `base_dir` isn't found in the filesystem.  If false,
   /// an error is returned.  If true, an empty selection is returned.
-  bool allow_non_existent = false;
+  bool allow_not_found = false;
   /// Whether to recurse into subdirectories.
   bool recursive = false;
   /// The maximum number of subdirectories to recurse into.
@@ -155,28 +132,40 @@ struct ARROW_EXPORT FileSelector {
 };
 
 /// \brief Abstract file system API
-class ARROW_EXPORT FileSystem {
+class ARROW_EXPORT FileSystem : public std::enable_shared_from_this<FileSystem> {
  public:
   virtual ~FileSystem();
 
   virtual std::string type_name() const = 0;
 
-  /// Get statistics for the given target.
+  /// Normalize path for the given filesystem
+  ///
+  /// The default implementation of this method is a no-op, but subclasses
+  /// may allow normalizing irregular path forms (such as Windows local paths).
+  virtual Result<std::string> NormalizePath(std::string path);
+
+  virtual bool Equals(const FileSystem& other) const = 0;
+
+  virtual bool Equals(const std::shared_ptr<FileSystem>& other) const {
+    return Equals(*other);
+  }
+
+  /// Get info for the given target.
   ///
   /// Any symlink is automatically dereferenced, recursively.
-  /// A non-existing or unreachable file returns an Ok status and
-  /// has a FileType of value NonExistent.  An error status indicates
+  /// A nonexistent or unreachable file returns an Ok status and
+  /// has a FileType of value NotFound.  An error status indicates
   /// a truly exceptional condition (low-level I/O error, etc.).
-  virtual Result<FileStats> GetTargetStats(const std::string& path) = 0;
+  virtual Result<FileInfo> GetFileInfo(const std::string& path) = 0;
   /// Same, for many targets at once.
-  virtual Result<std::vector<FileStats>> GetTargetStats(
+  virtual Result<std::vector<FileInfo>> GetFileInfo(
       const std::vector<std::string>& paths);
   /// Same, according to a selector.
   ///
   /// The selector's base directory will not be part of the results, even if
   /// it exists.
-  /// If it doesn't exist, see `FileSelector::allow_non_existent`.
-  virtual Result<std::vector<FileStats>> GetTargetStats(const FileSelector& select) = 0;
+  /// If it doesn't exist, see `FileSelector::allow_not_found`.
+  virtual Result<std::vector<FileInfo>> GetFileInfo(const FileSelector& select) = 0;
 
   /// Create a directory and subdirectories.
   ///
@@ -245,17 +234,24 @@ class ARROW_EXPORT FileSystem {
 /// "escape" the subtree and access other parts of the underlying filesystem.
 class ARROW_EXPORT SubTreeFileSystem : public FileSystem {
  public:
+  // This constructor may abort if base_path is invalid.
   explicit SubTreeFileSystem(const std::string& base_path,
                              std::shared_ptr<FileSystem> base_fs);
   ~SubTreeFileSystem() override;
 
   std::string type_name() const override { return "subtree"; }
+  std::string base_path() const { return base_path_; }
+  std::shared_ptr<FileSystem> base_fs() const { return base_fs_; }
+
+  Result<std::string> NormalizePath(std::string path) override;
+
+  bool Equals(const FileSystem& other) const override;
 
   /// \cond FALSE
-  using FileSystem::GetTargetStats;
+  using FileSystem::GetFileInfo;
   /// \endcond
-  Result<FileStats> GetTargetStats(const std::string& path) override;
-  Result<std::vector<FileStats>> GetTargetStats(const FileSelector& select) override;
+  Result<FileInfo> GetFileInfo(const std::string& path) override;
+  Result<std::vector<FileInfo>> GetFileInfo(const FileSelector& select) override;
 
   Status CreateDir(const std::string& path, bool recursive = true) override;
 
@@ -278,13 +274,18 @@ class ARROW_EXPORT SubTreeFileSystem : public FileSystem {
       const std::string& path) override;
 
  protected:
+  SubTreeFileSystem() {}
+
   const std::string base_path_;
   std::shared_ptr<FileSystem> base_fs_;
 
   std::string PrependBase(const std::string& s) const;
   Status PrependBaseNonEmpty(std::string* s) const;
-  Status StripBase(const std::string& s, std::string* out) const;
-  Status FixStats(FileStats* st) const;
+  Result<std::string> StripBase(const std::string& s) const;
+  Status FixInfo(FileInfo* info) const;
+
+  static Result<std::string> NormalizeBasePath(
+      std::string base_path, const std::shared_ptr<FileSystem>& base_fs);
 };
 
 /// \brief A FileSystem implementation that delegates to another
@@ -298,10 +299,11 @@ class ARROW_EXPORT SlowFileSystem : public FileSystem {
                  int32_t seed);
 
   std::string type_name() const override { return "slow"; }
+  bool Equals(const FileSystem& other) const override;
 
-  using FileSystem::GetTargetStats;
-  Result<FileStats> GetTargetStats(const std::string& path) override;
-  Result<std::vector<FileStats>> GetTargetStats(const FileSelector& select) override;
+  using FileSystem::GetFileInfo;
+  Result<FileInfo> GetFileInfo(const std::string& path) override;
+  Result<std::vector<FileInfo>> GetFileInfo(const FileSelector& select) override;
 
   Status CreateDir(const std::string& path, bool recursive = true) override;
 
@@ -353,18 +355,6 @@ Result<std::shared_ptr<FileSystem>> FileSystemFromUriOrPath(
     const std::string& uri, std::string* out_path = NULLPTR);
 
 /// @}
-
-/// \brief Create a new FileSystem by URI
-///
-/// Recognized schemes are "file", "mock", "hdfs" and "s3fs".
-///
-/// \param[in] uri a URI-based path, ex: file:///some/local/path
-/// \param[out] out_fs FileSystem instance.
-/// \param[out] out_path (optional) Path inside the filesystem.
-/// \return Status
-ARROW_DEPRECATED("Use Result-returning version")
-Status FileSystemFromUri(const std::string& uri, std::shared_ptr<FileSystem>* out_fs,
-                         std::string* out_path = NULLPTR);
 
 }  // namespace fs
 }  // namespace arrow

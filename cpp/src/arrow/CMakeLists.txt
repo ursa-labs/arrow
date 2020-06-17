@@ -120,8 +120,12 @@ function(ADD_ARROW_BENCHMARK REL_TEST_NAME)
 endfunction()
 
 set(ARROW_SRCS
-    array.cc
-    builder.cc
+    array/array_base.cc
+    array/array_binary.cc
+    array/array_decimal.cc
+    array/array_dict.cc
+    array/array_nested.cc
+    array/array_primitive.cc
     array/builder_adaptive.cc
     array/builder_base.cc
     array/builder_binary.cc
@@ -131,11 +135,14 @@ set(ARROW_SRCS
     array/builder_primitive.cc
     array/builder_union.cc
     array/concatenate.cc
-    array/dict_internal.cc
+    array/data.cc
     array/diff.cc
+    array/util.cc
     array/validate.cc
+    builder.cc
     buffer.cc
     compare.cc
+    datum.cc
     device.cc
     extension_type.cc
     memory_pool.cc
@@ -148,9 +155,15 @@ set(ARROW_SRCS
     table.cc
     table_builder.cc
     tensor.cc
+    tensor/coo_converter.cc
+    tensor/csc_converter.cc
+    tensor/csf_converter.cc
+    tensor/csr_converter.cc
     type.cc
     visitor.cc
+    c/bridge.cc
     io/buffered.cc
+    io/caching.cc
     io/compressed.cc
     io/file.cc
     io/hdfs.cc
@@ -160,19 +173,23 @@ set(ARROW_SRCS
     io/slow.cc
     testing/util.cc
     util/basic_decimal.cc
+    util/bit_block_counter.cc
     util/bit_util.cc
+    util/bitmap.cc
+    util/bitmap_builders.cc
+    util/bitmap_ops.cc
     util/compression.cc
     util/cpu_info.cc
     util/decimal.cc
     util/delimiting.cc
     util/formatting.cc
+    util/future.cc
     util/int_util.cc
     util/io_util.cc
     util/iterator.cc
     util/logging.cc
     util/key_value_metadata.cc
     util/memory.cc
-    util/parsing.cc
     util/string.cc
     util/string_builder.cc
     util/task_group.cc
@@ -181,6 +198,7 @@ set(ARROW_SRCS
     util/trie.cc
     util/uri.cc
     util/utf8.cc
+    util/value_parsing.cc
     vendored/base64.cpp
     vendored/datetime/tz.cpp
     vendored/double-conversion/bignum.cc
@@ -192,7 +210,12 @@ set(ARROW_SRCS
     vendored/double-conversion/diy-fp.cc
     vendored/double-conversion/strtod.cc)
 
+if(APPLE)
+  list(APPEND ARROW_SRCS vendored/datetime/ios.mm)
+endif()
+
 set(ARROW_C_SRCS
+    vendored/musl/strptime.c
     vendored/uriparser/UriCommon.c
     vendored/uriparser/UriCompare.c
     vendored/uriparser/UriEscape.c
@@ -301,34 +324,41 @@ if(ARROW_CSV)
               csv/converter.cc
               csv/chunker.cc
               csv/column_builder.cc
+              csv/column_decoder.cc
               csv/options.cc
               csv/parser.cc
               csv/reader.cc)
+
+  list(APPEND ARROW_TESTING_SRCS csv/test_common.cc)
 endif()
 
 if(ARROW_COMPUTE)
   list(APPEND ARROW_SRCS
-              compute/context.cc
-              compute/expression.cc
-              compute/logical_type.cc
-              compute/operation.cc
-              compute/kernels/aggregate.cc
-              compute/kernels/boolean.cc
-              compute/kernels/cast.cc
-              compute/kernels/compare.cc
-              compute/kernels/count.cc
-              compute/kernels/hash.cc
-              compute/kernels/filter.cc
-              compute/kernels/mean.cc
-              compute/kernels/minmax.cc
-              compute/kernels/sort_to_indices.cc
-              compute/kernels/sum.cc
-              compute/kernels/add.cc
-              compute/kernels/take.cc
-              compute/kernels/isin.cc
-              compute/kernels/util_internal.cc
-              compute/operations/cast.cc
-              compute/operations/literal.cc)
+              compute/api_aggregate.cc
+              compute/api_scalar.cc
+              compute/api_vector.cc
+              compute/cast.cc
+              compute/exec.cc
+              compute/function.cc
+              compute/kernel.cc
+              compute/registry.cc
+              compute/kernels/aggregate_basic.cc
+              compute/kernels/codegen_internal.cc
+              compute/kernels/scalar_arithmetic.cc
+              compute/kernels/scalar_boolean.cc
+              compute/kernels/scalar_cast_boolean.cc
+              compute/kernels/scalar_cast_internal.cc
+              compute/kernels/scalar_cast_nested.cc
+              compute/kernels/scalar_cast_numeric.cc
+              compute/kernels/scalar_cast_string.cc
+              compute/kernels/scalar_cast_temporal.cc
+              compute/kernels/scalar_compare.cc
+              compute/kernels/scalar_set_lookup.cc
+              compute/kernels/scalar_string.cc
+              compute/kernels/vector_filter.cc
+              compute/kernels/vector_hash.cc
+              compute/kernels/vector_sort.cc
+              compute/kernels/vector_take.cc)
 endif()
 
 if(ARROW_FILESYSTEM)
@@ -495,18 +525,18 @@ install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/arrow-config.cmake
 #
 # Unit tests
 #
-
 add_arrow_test(array_test
                SOURCES
-               array_test.cc
-               array_binary_test.cc
-               array_dict_test.cc
-               array_list_test.cc
-               array_struct_test.cc
-               array_union_test.cc
-               array_view_test.cc
+               array/array_test.cc
+               array/array_binary_test.cc
+               array/array_dict_test.cc
+               array/array_list_test.cc
+               array/array_struct_test.cc
+               array/array_union_test.cc
+               array/array_view_test.cc
                PRECOMPILED_HEADERS
                "$<$<COMPILE_LANGUAGE:CXX>:arrow/testing/pch.h>")
+
 add_arrow_test(buffer_test)
 
 if(ARROW_IPC)
@@ -514,8 +544,14 @@ if(ARROW_IPC)
   add_arrow_test(extension_type_test)
 endif()
 
-add_arrow_test(memory_pool_test)
-add_arrow_test(pretty_print_test)
+add_arrow_test(misc_test
+               SOURCES
+               datum_test.cc
+               memory_pool_test.cc
+               result_test.cc
+               pretty_print_test.cc
+               status_test.cc)
+
 add_arrow_test(public_api_test)
 
 set_source_files_properties(public_api_test.cc
@@ -525,12 +561,11 @@ set_source_files_properties(public_api_test.cc
                             SKIP_UNITY_BUILD_INCLUSION
                             ON)
 
-add_arrow_test(result_test)
 add_arrow_test(scalar_test)
-add_arrow_test(status_test)
 add_arrow_test(type_test)
-add_arrow_test(table_test)
-add_arrow_test(table_builder_test)
+
+add_arrow_test(table_test SOURCES table_test.cc table_builder_test.cc)
+
 add_arrow_test(tensor_test)
 add_arrow_test(sparse_tensor_test)
 
@@ -540,6 +575,7 @@ if(ARROW_COMPUTE)
 endif()
 
 add_arrow_benchmark(builder_benchmark)
+add_arrow_benchmark(memory_pool_benchmark)
 add_arrow_benchmark(type_benchmark)
 
 #
@@ -550,6 +586,7 @@ add_arrow_benchmark(type_benchmark)
 add_subdirectory(testing)
 
 add_subdirectory(array)
+add_subdirectory(c)
 add_subdirectory(io)
 add_subdirectory(util)
 add_subdirectory(vendored)

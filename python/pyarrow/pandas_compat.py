@@ -17,19 +17,18 @@
 
 
 import ast
+from collections.abc import Sequence
+from copy import deepcopy
 from itertools import zip_longest
 import json
 import operator
 import re
 import warnings
-from copy import deepcopy
 
 import numpy as np
 
 import pyarrow as pa
-from pyarrow.lib import _pandas_api
-from pyarrow.compat import (builtin_pickle,  # noqa
-                            frombytes, Sequence)
+from pyarrow.lib import _pandas_api, builtin_pickle, frombytes  # noqa
 
 
 _logical_type_map = {}
@@ -363,8 +362,8 @@ def _get_columns_to_convert(df, schema, preserve_index, columns):
     index_column_names = []
     for i, index_level in enumerate(index_levels):
         name = _index_level_name(index_level, i, column_names)
-        if (isinstance(index_level, _pandas_api.pd.RangeIndex)
-                and preserve_index is None):
+        if (isinstance(index_level, _pandas_api.pd.RangeIndex) and
+                preserve_index is None):
             descr = _get_range_index_descriptor(index_level)
         else:
             columns_to_convert.append(index_level)
@@ -512,6 +511,8 @@ def dataframe_to_types(df, preserve_index, columns=None):
         values = c.values
         if _pandas_api.is_categorical(values):
             type_ = pa.array(c, from_pandas=True).type
+        elif _pandas_api.is_extension_array_dtype(values):
+            type_ = pa.array(c.head(0), from_pandas=True).type
         else:
             values, type_ = get_datetimetz_type(values, c.dtype, None)
             type_ = pa.lib._ndarray_to_arrow_type(values, type_)
@@ -771,8 +772,8 @@ def table_to_blockmanager(options, table, categories=None,
 # dataframe (complex not included since not supported by Arrow)
 _pandas_supported_numpy_types = {
     str(np.dtype(typ))
-    for typ in (np.sctypes['int'] + np.sctypes['uint'] + np.sctypes['float']
-                + ['object', 'bool'])
+    for typ in (np.sctypes['int'] + np.sctypes['uint'] + np.sctypes['float'] +
+                ['object', 'bool'])
 }
 
 

@@ -225,14 +225,16 @@ class PlasmaClient::Impl : public std::enable_shared_from_this<PlasmaClient::Imp
   Status SetClientOptions(const std::string& client_name, int64_t output_memory_quota);
 
   Status Create(const ObjectID& object_id, int64_t data_size, const uint8_t* metadata,
-                int64_t metadata_size, std::shared_ptr<Buffer>* data, int device_num = 0);
+                int64_t metadata_size, std::shared_ptr<Buffer>* data, int device_num = 0,
+                bool evict_if_full = true);
 
   Status CreateAndSeal(const ObjectID& object_id, const std::string& data,
-                       const std::string& metadata);
+                       const std::string& metadata, bool evict_if_full = true);
 
   Status CreateAndSealBatch(const std::vector<ObjectID>& object_ids,
                             const std::vector<std::string>& data,
-                            const std::vector<std::string>& metadata);
+                            const std::vector<std::string>& metadata,
+                            bool evict_if_full = true);
 
   Status Get(const std::vector<ObjectID>& object_ids, int64_t timeout_ms,
              std::vector<ObjectBuffer>* object_buffers);
@@ -311,6 +313,10 @@ class PlasmaClient::Impl : public std::enable_shared_from_this<PlasmaClient::Imp
   uint64_t ComputeObjectHashCPU(const uint8_t* data, int64_t data_size,
                                 const uint8_t* metadata, int64_t metadata_size);
 
+#ifdef PLASMA_CUDA
+  arrow::Result<std::shared_ptr<CudaContext>> GetCudaContext(int device_number);
+#endif
+
   /// File descriptor of the Unix domain socket that connects to the store.
   int store_conn_;
   /// Table of dlmalloc buffer files that have been memory mapped so far. This
@@ -330,22 +336,11 @@ class PlasmaClient::Impl : public std::enable_shared_from_this<PlasmaClient::Imp
   std::deque<std::tuple<ObjectID, int64_t, int64_t>> pending_notification_;
   /// A mutex which protects this class.
   std::recursive_mutex client_mutex_;
-
-#ifdef PLASMA_CUDA
-  /// Cuda Device Manager.
-  arrow::cuda::CudaDeviceManager* manager_;
-#endif
 };
 
 PlasmaBuffer::~PlasmaBuffer() { ARROW_UNUSED(client_->Release(object_id_)); }
 
-PlasmaClient::Impl::Impl() : store_conn_(0), store_capacity_(0) {
-#ifdef PLASMA_CUDA
-  auto maybe_manager = CudaDeviceManager::Instance();
-  DCHECK_OK(maybe_manager.status());
-  manager_ = *maybe_manager;
-#endif
-}
+PlasmaClient::Impl::Impl() : store_conn_(0), store_capacity_(0) {}
 
 PlasmaClient::Impl::~Impl() {}
 
@@ -414,15 +409,24 @@ void PlasmaClient::Impl::IncrementObjectCount(const ObjectID& object_id,
   object_entry->count += 1;
 }
 
+#ifdef PLASMA_CUDA
+arrow::Result<std::shared_ptr<CudaContext>> PlasmaClient::Impl::GetCudaContext(
+    int device_number) {
+  ARROW_ASSIGN_OR_RAISE(auto manager, CudaDeviceManager::Instance());
+  return manager->GetContext(device_number - 1);
+}
+#endif
+
 Status PlasmaClient::Impl::Create(const ObjectID& object_id, int64_t data_size,
                                   const uint8_t* metadata, int64_t metadata_size,
-                                  std::shared_ptr<Buffer>* data, int device_num) {
+                                  std::shared_ptr<Buffer>* data, int device_num,
+                                  bool evict_if_full) {
   std::lock_guard<std::recursive_mutex> guard(client_mutex_);
 
   ARROW_LOG(DEBUG) << "called plasma_create on conn " << store_conn_ << " with size "
                    << data_size << " and metadata size " << metadata_size;
-  RETURN_NOT_OK(
-      SendCreateRequest(store_conn_, object_id, data_size, metadata_size, device_num));
+  RETURN_NOT_OK(SendCreateRequest(store_conn_, object_id, evict_if_full, data_size,
+                                  metadata_size, device_num));
   std::vector<uint8_t> buffer;
   RETURN_NOT_OK(PlasmaReceive(store_conn_, MessageType::PlasmaCreateReply, &buffer));
   ObjectID id;
@@ -451,8 +455,7 @@ Status PlasmaClient::Impl::Create(const ObjectID& object_id, int64_t data_size,
     }
   } else {
 #ifdef PLASMA_CUDA
-    std::shared_ptr<CudaContext> context;
-    ARROW_ASSIGN_OR_RAISE(context, manager_->GetContext(device_num - 1));
+    ARROW_ASSIGN_OR_RAISE(auto context, GetCudaContext(device_num));
     GpuProcessHandle* handle = new GpuProcessHandle();
     handle->client_count = 2;
     ARROW_ASSIGN_OR_RAISE(handle->ptr, context->OpenIpcBuffer(*object.ipc_handle));
@@ -485,7 +488,8 @@ Status PlasmaClient::Impl::Create(const ObjectID& object_id, int64_t data_size,
 
 Status PlasmaClient::Impl::CreateAndSeal(const ObjectID& object_id,
                                          const std::string& data,
-                                         const std::string& metadata) {
+                                         const std::string& metadata,
+                                         bool evict_if_full) {
   std::lock_guard<std::recursive_mutex> guard(client_mutex_);
 
   ARROW_LOG(DEBUG) << "called CreateAndSeal on conn " << store_conn_;
@@ -496,7 +500,8 @@ Status PlasmaClient::Impl::CreateAndSeal(const ObjectID& object_id,
       reinterpret_cast<const uint8_t*>(metadata.data()), metadata.size());
   memcpy(&digest[0], &hash, sizeof(hash));
 
-  RETURN_NOT_OK(SendCreateAndSealRequest(store_conn_, object_id, data, metadata, digest));
+  RETURN_NOT_OK(SendCreateAndSealRequest(store_conn_, object_id, evict_if_full, data,
+                                         metadata, digest));
   std::vector<uint8_t> buffer;
   RETURN_NOT_OK(
       PlasmaReceive(store_conn_, MessageType::PlasmaCreateAndSealReply, &buffer));
@@ -506,7 +511,8 @@ Status PlasmaClient::Impl::CreateAndSeal(const ObjectID& object_id,
 
 Status PlasmaClient::Impl::CreateAndSealBatch(const std::vector<ObjectID>& object_ids,
                                               const std::vector<std::string>& data,
-                                              const std::vector<std::string>& metadata) {
+                                              const std::vector<std::string>& metadata,
+                                              bool evict_if_full) {
   std::lock_guard<std::recursive_mutex> guard(client_mutex_);
 
   ARROW_LOG(DEBUG) << "called CreateAndSealBatch on conn " << store_conn_;
@@ -522,8 +528,8 @@ Status PlasmaClient::Impl::CreateAndSealBatch(const std::vector<ObjectID>& objec
     digests.push_back(digest);
   }
 
-  RETURN_NOT_OK(
-      SendCreateAndSealBatchRequest(store_conn_, object_ids, data, metadata, digests));
+  RETURN_NOT_OK(SendCreateAndSealBatchRequest(store_conn_, object_ids, evict_if_full,
+                                              data, metadata, digests));
   std::vector<uint8_t> buffer;
   RETURN_NOT_OK(
       PlasmaReceive(store_conn_, MessageType::PlasmaCreateAndSealBatchReply, &buffer));
@@ -633,8 +639,7 @@ Status PlasmaClient::Impl::GetBuffers(
         std::lock_guard<std::mutex> lock(gpu_mutex);
         auto iter = gpu_object_map.find(object_ids[i]);
         if (iter == gpu_object_map.end()) {
-          std::shared_ptr<CudaContext> context;
-          ARROW_ASSIGN_OR_RAISE(context, manager_->GetContext(object->device_num - 1));
+          ARROW_ASSIGN_OR_RAISE(auto context, GetCudaContext(object->device_num));
           GpuProcessHandle* obj_handle = new GpuProcessHandle();
           obj_handle->client_count = 1;
           ARROW_ASSIGN_OR_RAISE(obj_handle->ptr,
@@ -792,7 +797,7 @@ bool PlasmaClient::Impl::ComputeObjectHashParallel(XXH64_state_t* hash_state,
   // | num_threads * chunk_size | suffix |, where chunk_size = k * block_size.
   // Each thread gets a "chunk" of k blocks, except the suffix thread.
 
-  std::vector<std::future<void>> futures;
+  std::vector<arrow::Future<void>> futures;
   for (int i = 0; i < num_threads; i++) {
     futures.push_back(*pool->Submit(
         ComputeBlockHash, reinterpret_cast<uint8_t*>(data_address) + i * chunk_size,
@@ -802,7 +807,7 @@ bool PlasmaClient::Impl::ComputeObjectHashParallel(XXH64_state_t* hash_state,
                    &threadhash[num_threads]);
 
   for (auto& fut : futures) {
-    fut.get();
+    ARROW_CHECK_OK(fut.status());
   }
 
   XXH64_update(hash_state, reinterpret_cast<unsigned char*>(threadhash),
@@ -845,7 +850,7 @@ Status PlasmaClient::Impl::Seal(const ObjectID& object_id) {
   auto object_entry = objects_in_use_.find(object_id);
 
   if (object_entry == objects_in_use_.end()) {
-    return MakePlasmaError(PlasmaErrorCode::PlasmaObjectNonexistent,
+    return MakePlasmaError(PlasmaErrorCode::PlasmaObjectNotFound,
                            "Seal() called on an object without a reference to it");
   }
   if (object_entry->second->is_sealed) {
@@ -859,6 +864,11 @@ Status PlasmaClient::Impl::Seal(const ObjectID& object_id) {
   RETURN_NOT_OK(Hash(object_id, &digest[0]));
   RETURN_NOT_OK(
       SendSealRequest(store_conn_, object_id, std::string(digest.begin(), digest.end())));
+  std::vector<uint8_t> buffer;
+  RETURN_NOT_OK(PlasmaReceive(store_conn_, MessageType::PlasmaSealReply, &buffer));
+  ObjectID sealed_id;
+  RETURN_NOT_OK(ReadSealReply(buffer.data(), buffer.size(), &sealed_id));
+  ARROW_CHECK(sealed_id == object_id);
   // We call PlasmaClient::Release to decrement the number of instances of this
   // object
   // that are currently being used by this client. The corresponding increment
@@ -962,7 +972,7 @@ Status PlasmaClient::Impl::Hash(const ObjectID& object_id, uint8_t* digest) {
   RETURN_NOT_OK(Get({object_id}, 0, &object_buffers));
   // If the object was not retrieved, return false.
   if (!object_buffers[0].data) {
-    return MakePlasmaError(PlasmaErrorCode::PlasmaObjectNonexistent, "Object not found");
+    return MakePlasmaError(PlasmaErrorCode::PlasmaObjectNotFound, "Object not found");
   }
   // Compute the hash.
   uint64_t hash = ComputeObjectHash(object_buffers[0]);
@@ -1126,19 +1136,22 @@ Status PlasmaClient::SetClientOptions(const std::string& client_name,
 
 Status PlasmaClient::Create(const ObjectID& object_id, int64_t data_size,
                             const uint8_t* metadata, int64_t metadata_size,
-                            std::shared_ptr<Buffer>* data, int device_num) {
-  return impl_->Create(object_id, data_size, metadata, metadata_size, data, device_num);
+                            std::shared_ptr<Buffer>* data, int device_num,
+                            bool evict_if_full) {
+  return impl_->Create(object_id, data_size, metadata, metadata_size, data, device_num,
+                       evict_if_full);
 }
 
 Status PlasmaClient::CreateAndSeal(const ObjectID& object_id, const std::string& data,
-                                   const std::string& metadata) {
-  return impl_->CreateAndSeal(object_id, data, metadata);
+                                   const std::string& metadata, bool evict_if_full) {
+  return impl_->CreateAndSeal(object_id, data, metadata, evict_if_full);
 }
 
 Status PlasmaClient::CreateAndSealBatch(const std::vector<ObjectID>& object_ids,
                                         const std::vector<std::string>& data,
-                                        const std::vector<std::string>& metadata) {
-  return impl_->CreateAndSealBatch(object_ids, data, metadata);
+                                        const std::vector<std::string>& metadata,
+                                        bool evict_if_full) {
+  return impl_->CreateAndSealBatch(object_ids, data, metadata, evict_if_full);
 }
 
 Status PlasmaClient::Get(const std::vector<ObjectID>& object_ids, int64_t timeout_ms,

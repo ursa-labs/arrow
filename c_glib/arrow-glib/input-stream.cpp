@@ -31,7 +31,10 @@
 #include <arrow-glib/error.hpp>
 #include <arrow-glib/file.hpp>
 #include <arrow-glib/input-stream.hpp>
+#include <arrow-glib/ipc-options.hpp>
 #include <arrow-glib/readable.hpp>
+#include <arrow-glib/record-batch.hpp>
+#include <arrow-glib/schema.hpp>
 #include <arrow-glib/tensor.hpp>
 
 #include <mutex>
@@ -117,7 +120,7 @@ garrow_input_stream_finalize(GObject *object)
 {
   auto priv = GARROW_INPUT_STREAM_GET_PRIVATE(object);
 
-  priv->input_stream = nullptr;
+  priv->input_stream.~shared_ptr();
 
   G_OBJECT_CLASS(garrow_input_stream_parent_class)->finalize(object);
 }
@@ -208,6 +211,8 @@ garrow_input_stream_close(GInputStream *stream,
 static void
 garrow_input_stream_init(GArrowInputStream *object)
 {
+  auto priv = GARROW_INPUT_STREAM_GET_PRIVATE(object);
+  new(&priv->input_stream) std::shared_ptr<arrow::io::InputStream>;
 }
 
 static void
@@ -298,6 +303,60 @@ garrow_input_stream_read_tensor(GArrowInputStream *input_stream,
   }
 }
 
+/**
+ * garrow_input_stream_read_record_batch:
+ * @input_stream: A #GArrowInputStream.
+ * @schema: A #GArrowSchema for a read record batch.
+ * @options: (nullable): A #GArrowReadOptions.
+ * @error: (nullable): Return location for a #GError or %NULL.
+ *
+ * Returns: (transfer full) (nullable):
+ *   #GArrowRecordBatch on success, %NULL on error.
+ *
+ * Since: 1.0.0
+ */
+GArrowRecordBatch *
+garrow_input_stream_read_record_batch(GArrowInputStream *input_stream,
+                                      GArrowSchema *schema,
+                                      GArrowReadOptions *options,
+                                      GError **error)
+{
+  auto arrow_input_stream = garrow_input_stream_get_raw(input_stream);
+  auto arrow_schema = garrow_schema_get_raw(schema);
+
+  if (options) {
+    auto arrow_options = garrow_read_options_get_raw(options);
+    auto arrow_dictionary_memo =
+      garrow_read_options_get_dictionary_memo_raw(options);
+    auto arrow_record_batch =
+      arrow::ipc::ReadRecordBatch(arrow_schema,
+                                  arrow_dictionary_memo,
+                                  *arrow_options,
+                                  arrow_input_stream.get());
+    if (garrow::check(error,
+                      arrow_record_batch,
+                      "[input-stream][read-record-batch]")) {
+      return garrow_record_batch_new_raw(&(*arrow_record_batch));
+    } else {
+      return NULL;
+    }
+  } else {
+    auto arrow_options = arrow::ipc::IpcReadOptions::Defaults();
+    auto arrow_record_batch =
+      arrow::ipc::ReadRecordBatch(arrow_schema,
+                                  nullptr,
+                                  arrow_options,
+                                  arrow_input_stream.get());
+    if (garrow::check(error,
+                      arrow_record_batch,
+                      "[input-stream][read-record-batch]")) {
+      return garrow_record_batch_new_raw(&(*arrow_record_batch));
+    } else {
+      return NULL;
+    }
+  }
+}
+
 
 G_DEFINE_TYPE(GArrowSeekableInputStream,
               garrow_seekable_input_stream,
@@ -373,6 +432,48 @@ garrow_seekable_input_stream_read_at(GArrowSeekableInputStream *input_stream,
   } else {
     return NULL;
   }
+}
+
+/**
+ * garrow_seekable_input_stream_read_at_bytes:
+ * @input_stream: A #GArrowSeekableInputStream.
+ * @position: The read start position.
+ * @n_bytes: The number of bytes to be read.
+ * @error: (nullable): Return location for a #GError or %NULL.
+ *
+ * Returns: (transfer full) (nullable): #GBytes that has read data on
+ *   success, %NULL if there was an error.
+ *
+ * Since: 0.15.0
+ */
+GBytes *
+garrow_seekable_input_stream_read_at_bytes(GArrowSeekableInputStream *input_stream,
+                                           gint64 position,
+                                           gint64 n_bytes,
+                                           GError **error)
+{
+  auto arrow_random_access_file =
+    garrow_seekable_input_stream_get_raw(input_stream);
+
+  auto arrow_buffer_result = arrow_random_access_file->ReadAt(position, n_bytes);
+  if (!garrow::check(error,
+                     arrow_buffer_result,
+                     "[seekable-input-stream][read-at][bytes]")) {
+    return NULL;
+  }
+
+  auto arrow_cpu_buffer_result =
+    arrow::Buffer::ViewOrCopy(*arrow_buffer_result,
+                              arrow::default_cpu_memory_manager());
+  if (!garrow::check(error,
+                     arrow_cpu_buffer_result,
+                     "[seekable-input-stream][read-at][bytes][view-or-copy]")) {
+    return NULL;
+  }
+
+  auto arrow_cpu_buffer = *arrow_cpu_buffer_result;
+  return g_bytes_new(arrow_cpu_buffer->data(),
+                     arrow_cpu_buffer->size());
 }
 
 
@@ -654,9 +755,7 @@ namespace garrow {
 
     arrow::Result<std::shared_ptr<arrow::Buffer>>
     Read(int64_t n_bytes) override {
-      arrow::MemoryPool *pool = arrow::default_memory_pool();
-      std::shared_ptr<arrow::ResizableBuffer> buffer;
-      RETURN_NOT_OK(AllocateResizableBuffer(pool, n_bytes, &buffer));
+      ARROW_ASSIGN_OR_RAISE(auto buffer, arrow::AllocateResizableBuffer(n_bytes));
 
       std::lock_guard<std::mutex> guard(lock_);
       GError *error = NULL;
@@ -673,8 +772,39 @@ namespace garrow {
         if (n_read_bytes < n_bytes) {
           RETURN_NOT_OK(buffer->Resize(n_read_bytes));
         }
-        return buffer;
+        return std::move(buffer);
       }
+    }
+
+    arrow::Result<arrow::util::string_view> Peek(int64_t nbytes) override {
+      if (!G_IS_BUFFERED_INPUT_STREAM(input_stream_)) {
+        std::string message("[gio-input-stream][peek] "
+                            "not peekable input stream: <");
+        message += G_OBJECT_CLASS_NAME(G_OBJECT_GET_CLASS(input_stream_));
+        message += ">";
+        return arrow::Status::NotImplemented(message);
+      }
+
+      auto stream = G_BUFFERED_INPUT_STREAM(input_stream_);
+      auto available_n_bytes = g_buffered_input_stream_get_available(stream);
+      if (available_n_bytes < static_cast<gsize>(nbytes)) {
+        GError *error = NULL;
+        auto filled_size =
+          g_buffered_input_stream_fill(stream, nbytes, NULL, &error);
+        if (filled_size == -1) {
+          return garrow_error_to_status(error,
+                                        arrow::StatusCode::IOError,
+                                        "[gio-input-stream][peek] "
+                                        "failed to fill");
+        }
+      }
+      gsize data_size;
+      auto data = g_buffered_input_stream_peek_buffer(stream, &data_size);
+      if (data_size > static_cast<gsize>(nbytes)) {
+        data_size = nbytes;
+      }
+      return arrow::util::string_view(static_cast<const char *>(data),
+                                      data_size);
     }
 
     arrow::Status Seek(int64_t position) override {
@@ -1034,8 +1164,19 @@ garrow_input_stream_get_raw(GArrowInputStream *input_stream)
   return priv->input_stream;
 }
 
+GArrowSeekableInputStream *
+garrow_seekable_input_stream_new_raw(
+  std::shared_ptr<arrow::io::RandomAccessFile> *arrow_random_access_file)
+{
+  auto object = g_object_new(GARROW_TYPE_SEEKABLE_INPUT_STREAM,
+                             "input-stream", arrow_random_access_file,
+                             NULL);
+  return GARROW_SEEKABLE_INPUT_STREAM(object);
+}
+
 std::shared_ptr<arrow::io::RandomAccessFile>
-garrow_seekable_input_stream_get_raw(GArrowSeekableInputStream *seekable_input_stream)
+garrow_seekable_input_stream_get_raw(
+  GArrowSeekableInputStream *seekable_input_stream)
 {
   auto arrow_input_stream =
     garrow_input_stream_get_raw(GARROW_INPUT_STREAM(seekable_input_stream));

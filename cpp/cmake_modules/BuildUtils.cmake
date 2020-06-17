@@ -250,7 +250,8 @@ function(ADD_ARROW_LIB LIB_NAME)
       target_include_directories(${LIB_NAME}_shared PRIVATE ${ARG_PRIVATE_INCLUDES})
     endif()
 
-    if(APPLE AND NOT DEFINED $ENV{EMSCRIPTEN})
+    # On iOS, specifying -undefined conflicts with enabling bitcode
+    if(APPLE AND NOT IOS AND NOT DEFINED $ENV{EMSCRIPTEN})
       # On OS X, you can avoid linking at library load time and instead
       # expecting that the symbols have been loaded separately. This happens
       # with libpython* where there can be conflicts between system Python and
@@ -656,6 +657,21 @@ function(ADD_TEST_CASE REL_TEST_NAME)
   else()
     set(ARG_LABELS unittest)
   endif()
+
+  foreach(LABEL ${ARG_LABELS})
+    # ensure there is a cmake target which exercises tests with this LABEL
+    set(LABEL_TEST_NAME "test-${LABEL}")
+    if(NOT TARGET ${LABEL_TEST_NAME})
+      add_custom_target(${LABEL_TEST_NAME}
+                        ctest
+                        -L
+                        "${LABEL}"
+                        --output-on-failure
+                        USES_TERMINAL)
+    endif()
+    # ensure the test is (re)built before the LABEL test runs
+    add_dependencies(${LABEL_TEST_NAME} ${TEST_NAME})
+  endforeach()
 
   set_property(TEST ${TEST_NAME} APPEND PROPERTY LABELS ${ARG_LABELS})
 endfunction()

@@ -27,6 +27,7 @@ import java.util.concurrent.TimeUnit;
 import org.apache.arrow.gandiva.exceptions.GandivaException;
 import org.apache.arrow.gandiva.expression.Condition;
 import org.apache.arrow.gandiva.expression.ExpressionTree;
+import org.apache.arrow.memory.ArrowBuf;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.DecimalVector;
@@ -40,8 +41,6 @@ import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.junit.After;
 import org.junit.Before;
-
-import io.netty.buffer.ArrowBuf;
 
 class BaseEvaluatorTest {
 
@@ -279,6 +278,15 @@ class BaseEvaluatorTest {
       buffer.writeLong(instant.toEpochMilli());
     }
 
+    return buffer;
+  }
+
+  ArrowBuf stringToDayInterval(String[] values) {
+    ArrowBuf buffer = allocator.buffer(values.length * 8);
+    for (int i = 0; i < values.length; i++) {
+      buffer.writeInt(Integer.parseInt(values[i].split(" ")[0])); // days
+      buffer.writeInt(Integer.parseInt(values[i].split(" ")[1])); // millis
+    }
     return buffer;
   }
 

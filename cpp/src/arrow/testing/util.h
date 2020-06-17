@@ -39,27 +39,18 @@
 
 namespace arrow {
 
-class Array;
-class ChunkedArray;
-class MemoryPool;
-class RecordBatch;
-class Table;
-
-using ArrayVector = std::vector<std::shared_ptr<Array>>;
-
 template <typename T>
 Status CopyBufferFromVector(const std::vector<T>& values, MemoryPool* pool,
                             std::shared_ptr<Buffer>* result) {
   int64_t nbytes = static_cast<int>(values.size()) * sizeof(T);
 
-  std::shared_ptr<Buffer> buffer;
-  RETURN_NOT_OK(AllocateBuffer(pool, nbytes, &buffer));
+  ARROW_ASSIGN_OR_RAISE(auto buffer, AllocateBuffer(nbytes, pool));
   auto immutable_data = reinterpret_cast<const uint8_t*>(values.data());
   std::copy(immutable_data, immutable_data + nbytes, buffer->mutable_data());
   memset(buffer->mutable_data() + nbytes, 0,
          static_cast<size_t>(buffer->capacity() - nbytes));
 
-  *result = buffer;
+  *result = std::move(buffer);
   return Status::OK();
 }
 
@@ -176,6 +167,11 @@ template <typename Fn>
 Result<std::shared_ptr<Array>> ArrayFromBuilderVisitor(
     const std::shared_ptr<DataType>& type, int64_t length, Fn&& fn) {
   return ArrayFromBuilderVisitor(type, length, length, std::forward<Fn>(fn));
+}
+
+static inline std::vector<std::shared_ptr<DataType> (*)(FieldVector, std::vector<int8_t>)>
+UnionTypeFactories() {
+  return {sparse_union, dense_union};
 }
 
 // Get a TCP port number to listen on.  This is a different number every time,

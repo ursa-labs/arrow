@@ -143,7 +143,7 @@ ggandiva_node_finalize(GObject *object)
 {
   auto priv = GGANDIVA_NODE_GET_PRIVATE(object);
 
-  priv->node = nullptr;
+  priv->node.~shared_ptr();
 
   G_OBJECT_CLASS(ggandiva_node_parent_class)->finalize(object);
 }
@@ -191,6 +191,8 @@ ggandiva_node_get_property(GObject *object,
 static void
 ggandiva_node_init(GGandivaNode *object)
 {
+  auto priv = GGANDIVA_NODE_GET_PRIVATE(object);
+  new(&priv->node) std::shared_ptr<gandiva::Node>;
 }
 
 static void
@@ -1442,7 +1444,7 @@ ggandiva_boolean_node_class_init(GGandivaBooleanNodeClass *klass)
  * Returns: (transfer none) (element-type GGandivaNode):
  *   The children of the boolean node.
  *
- * Since: 1.0.0
+ * Since: 0.17.0
  */
 GList *
 ggandiva_boolean_node_get_children(GGandivaBooleanNode *node)
@@ -1472,7 +1474,7 @@ ggandiva_and_node_class_init(GGandivaAndNodeClass *klass)
  *
  * Returns: A newly created #GGandivaAndNode for the AND expression.
  *
- * Since: 1.0.0
+ * Since: 0.17.0
  */
 GGandivaAndNode *
 ggandiva_and_node_new(GList *children)
@@ -1508,7 +1510,7 @@ ggandiva_or_node_class_init(GGandivaOrNodeClass *klass)
  *
  * Returns: A newly created #GGandivaOrNode for the OR expression.
  *
- * Since: 1.0.0
+ * Since: 0.17.0
  */
 GGandivaOrNode *
 ggandiva_or_node_new(GList *children)

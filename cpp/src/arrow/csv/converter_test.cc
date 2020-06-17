@@ -34,6 +34,7 @@
 #include "arrow/util/checked_cast.h"
 #include "arrow/util/decimal.h"
 #include "arrow/util/logging.h"
+#include "arrow/util/value_parsing.h"
 
 namespace arrow {
 namespace csv {
@@ -374,6 +375,21 @@ TEST(TimestampConversion, CustomNulls) {
                                            {{true}, {false}, {false}}, options);
 }
 
+TEST(TimestampConversion, UserDefinedParsers) {
+  auto options = ConvertOptions::Defaults();
+  auto type = timestamp(TimeUnit::MILLI);
+
+  // Test a single parser
+  options.timestamp_parsers = {TimestampParser::MakeStrptime("%m/%d/%Y")};
+  AssertConversion<TimestampType, int64_t>(type, {"01/02/1970,01/03/1970\n"},
+                                           {{86400000}, {172800000}}, options);
+
+  // Test multiple parsers
+  options.timestamp_parsers.push_back(TimestampParser::MakeISO8601());
+  AssertConversion<TimestampType, int64_t>(type, {"01/02/1970,1970-01-03\n"},
+                                           {{86400000}, {172800000}}, options);
+}
+
 Decimal128 Dec128(util::string_view value) {
   Decimal128 dec;
   int32_t scale = 0;
@@ -436,7 +452,7 @@ class TestDictConverter : public ::testing::Test {
 
 using DictConversionTypes = ::testing::Types<BinaryType, StringType>;
 
-TYPED_TEST_CASE(TestDictConverter, DictConversionTypes);
+TYPED_TEST_SUITE(TestDictConverter, DictConversionTypes);
 
 TYPED_TEST(TestDictConverter, Basics) {
   auto expected_dict = ArrayFromJSON(this->type(), R"(["ab", "cdé", ""])");

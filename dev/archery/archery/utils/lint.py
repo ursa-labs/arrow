@@ -17,6 +17,7 @@
 
 import gzip
 import os
+from pathlib import Path
 
 import click
 
@@ -26,7 +27,7 @@ from .git import git
 from .logger import logger
 from ..lang.cpp import CppCMakeDefinition, CppConfiguration
 from ..lang.rust import Cargo
-from ..lang.python import Flake8, NumpyDoc
+from ..lang.python import Autopep8, Flake8, NumpyDoc
 from .rat import Rat, exclusion_from_globs
 from .tmpdir import tmpdir
 
@@ -49,7 +50,8 @@ class LintResult:
 
 
 def cpp_linter(src, build_dir, clang_format=True, cpplint=True,
-               clang_tidy=False, iwyu=False, fix=False):
+               clang_tidy=False, iwyu=False, iwyu_all=False,
+               fix=False):
     """ Run clang-format, cpplint and clang-tidy on cpp/ codebase. """
     logger.info("Running C++ linters")
 
@@ -81,7 +83,11 @@ def cpp_linter(src, build_dir, clang_format=True, cpplint=True,
         yield LintResult.from_cmd(build.run("check-clang-tidy", check=False))
 
     if iwyu:
-        yield LintResult.from_cmd(build.run("iwyu", check=False))
+        if iwyu_all:
+            iwyu_cmd = "iwyu-all"
+        else:
+            iwyu_cmd = "iwyu"
+        yield LintResult.from_cmd(build.run(iwyu_cmd, check=False))
 
 
 class CMakeFormat(Command):
@@ -94,25 +100,71 @@ def cmake_linter(src, fix=False):
     logger.info("Running cmake-format linters")
 
     if not fix:
-        logger.warn("run-cmake-format modifies files, irregardless of --fix")
+        logger.warn("run-cmake-format modifies files, regardless of --fix")
 
     arrow_cmake_format = os.path.join(src.path, "run-cmake-format.py")
     cmake_format = CMakeFormat(cmake_format_bin=arrow_cmake_format)
     yield LintResult.from_cmd(cmake_format("--check"))
 
 
-def python_linter(src):
-    """Run flake8 linter on python/pyarrow, and dev/. """
-    logger.info("Running python linters")
-    flake8 = Flake8()
+def python_linter(src, fix=False):
+    """Run Python linters on python/pyarrow, python/examples, setup.py
+    and dev/. """
+    setup_py = os.path.join(src.python, "setup.py")
+    setup_cfg = os.path.join(src.python, "setup.cfg")
 
-    if not flake8.available:
-        logger.error("python linter requested but flake8 binary not found.")
+    logger.info("Running Python formatter (autopep8)")
+
+    autopep8 = Autopep8()
+    if not autopep8.available:
+        logger.error(
+            "Python formatter requested but autopep8 binary not found. "
+            "Please run `pip install -r dev/archery/requirements-lint.txt`")
         return
 
-    setup_py = os.path.join(src.python, "setup.py")
-    yield LintResult.from_cmd(flake8(setup_py, src.pyarrow, src.dev,
-                                     check=False))
+    # Gather files for autopep8
+    patterns = ["python/pyarrow/**/*.py",
+                "python/pyarrow/**/*.pyx",
+                "python/pyarrow/**/*.pxd",
+                "python/pyarrow/**/*.pxi",
+                "python/examples/**/*.py",
+                "dev/archery/**/*.py",
+                ]
+    files = [setup_py]
+    for pattern in patterns:
+        files += list(map(str, Path(src.path).glob(pattern)))
+
+    args = ['--global-config', setup_cfg, '--ignore-local-config']
+    if fix:
+        args += ['-j0', '--in-place']
+        args += sorted(files)
+        yield LintResult.from_cmd(autopep8(*args))
+    else:
+        # XXX `-j0` doesn't work well with `--exit-code`, so instead
+        # we capture the diff and check whether it's empty
+        # (https://github.com/hhatto/autopep8/issues/543)
+        args += ['-j0', '--diff']
+        args += sorted(files)
+        diff = autopep8.run_captured(*args)
+        if diff:
+            print(diff.decode('utf8'))
+            yield LintResult(success=False)
+        else:
+            yield LintResult(success=True)
+
+    # Run flake8 after autopep8 (the latter may have modified some files)
+    logger.info("Running Python linter (flake8)")
+
+    flake8 = Flake8()
+    if not flake8.available:
+        logger.error(
+            "Python linter requested but flake8 binary not found. "
+            "Please run `pip install -r dev/archery/requirements-lint.txt`")
+        return
+
+    yield LintResult.from_cmd(flake8(setup_py, src.pyarrow,
+                                     os.path.join(src.python, "examples"),
+                                     src.dev, check=False))
     config = os.path.join(src.python, ".flake8.cython")
     yield LintResult.from_cmd(flake8("--config=" + config, src.pyarrow,
                                      check=False))
@@ -123,7 +175,7 @@ def python_numpydoc(symbols=None, whitelist=None, blacklist=None):
 
     Pyarrow must be available for import.
     """
-    logger.info("Running python docstring linters")
+    logger.info("Running Python docstring linters")
     # by default try to run on all pyarrow package
     symbols = symbols or {
         'pyarrow',
@@ -143,8 +195,9 @@ def python_numpydoc(symbols=None, whitelist=None, blacklist=None):
     }
     try:
         numpydoc = NumpyDoc(symbols)
-    except RuntimeError:
-        logger.error('Numpydoc is not available')
+    except RuntimeError as e:
+        logger.error(str(e))
+        yield LintResult(success=False)
         return
 
     results = numpydoc.validate(
@@ -210,7 +263,7 @@ def rat_linter(src, root):
     logger.info("Running apache-rat linter")
 
     if src.git_dirty:
-        logger.warn("Due to the usage of git-archive, uncommited files will"
+        logger.warn("Due to the usage of git-archive, uncommitted files will"
                     " not be checked for rat violations. ")
 
     exclusion = exclusion_from_globs(
@@ -224,25 +277,25 @@ def rat_linter(src, root):
 
     violations = list(report.validate(exclusion=exclusion))
     for violation in violations:
-        print(f"apache-rat license violation: {violation}")
+        print("apache-rat license violation: {}".format(violation))
 
     yield LintResult(len(violations) == 0)
 
 
 def r_linter(src):
     """Run R linter."""
-    logger.info("Running r linter")
+    logger.info("Running R linter")
     r_lint_sh = os.path.join(src.r, "lint.sh")
     yield LintResult.from_cmd(Bash().run(r_lint_sh, check=False))
 
 
 def rust_linter(src):
     """Run Rust linter."""
-    logger.info("Running rust linter")
+    logger.info("Running Rust linter")
     cargo = Cargo()
 
     if not cargo.available:
-        logger.error("rust linter requested but cargo executable not found.")
+        logger.error("Rust linter requested but cargo executable not found.")
         return
 
     yield LintResult.from_cmd(cargo.run("+stable", "fmt", "--all", "--",
@@ -267,7 +320,7 @@ def is_docker_image(path):
 
 def docker_linter(src):
     """Run Hadolint docker linter."""
-    logger.info("Running docker linter")
+    logger.info("Running Docker linter")
 
     hadolint = Hadolint()
 
@@ -282,12 +335,10 @@ def docker_linter(src):
                                                    cwd=src.path))
 
 
-def linter(src, with_clang_format=True, with_cpplint=True,
-           with_clang_tidy=False, with_iwyu=False,
-           with_flake8=True, with_numpydoc=False, with_cmake_format=True,
-           with_rat=True, with_r=True, with_rust=True,
-           with_docker=True,
-           fix=False):
+def linter(src, fix=False, *, clang_format=False, cpplint=False,
+           clang_tidy=False, iwyu=False, iwyu_all=False,
+           python=False, numpydoc=False, cmake_format=False, rat=False,
+           r=False, rust=False, docker=False):
     """Run all linters."""
     with tmpdir(prefix="arrow-lint-") as root:
         build_dir = os.path.join(root, "cpp-build")
@@ -297,33 +348,34 @@ def linter(src, with_clang_format=True, with_cpplint=True,
         # errors to the user.
         results = []
 
-        if with_clang_format or with_cpplint or with_clang_tidy or with_iwyu:
+        if clang_format or cpplint or clang_tidy or iwyu:
             results.extend(cpp_linter(src, build_dir,
-                                      clang_format=with_clang_format,
-                                      cpplint=with_cpplint,
-                                      clang_tidy=with_clang_tidy,
-                                      iwyu=with_iwyu,
+                                      clang_format=clang_format,
+                                      cpplint=cpplint,
+                                      clang_tidy=clang_tidy,
+                                      iwyu=iwyu,
+                                      iwyu_all=iwyu_all,
                                       fix=fix))
 
-        if with_flake8:
-            results.extend(python_linter(src))
+        if python:
+            results.extend(python_linter(src, fix=fix))
 
-        if with_numpydoc:
+        if numpydoc:
             results.extend(python_numpydoc())
 
-        if with_cmake_format:
+        if cmake_format:
             results.extend(cmake_linter(src, fix=fix))
 
-        if with_rat:
+        if rat:
             results.extend(rat_linter(src, root))
 
-        if with_r:
+        if r:
             results.extend(r_linter(src))
 
-        if with_rust:
+        if rust:
             results.extend(rust_linter(src))
 
-        if with_docker:
+        if docker:
             results.extend(docker_linter(src))
 
         # Raise error if one linter failed, ensuring calling code can exit with

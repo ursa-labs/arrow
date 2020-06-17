@@ -20,6 +20,11 @@
 #include "./arrow_types.h"
 
 #if defined(ARROW_R_WITH_ARROW)
+#include <arrow/array/array_base.h>
+#include <arrow/builder.h>
+#include <arrow/table.h>
+#include <arrow/util/bitmap_writer.h>
+#include <arrow/visitor_inline.h>
 
 using arrow::internal::checked_cast;
 
@@ -203,13 +208,13 @@ struct VectorToArrayConverter {
 
   static std::shared_ptr<Array> Visit(SEXP x, const std::shared_ptr<DataType>& type) {
     std::unique_ptr<ArrayBuilder> builder;
-    STOP_IF_NOT_OK(MakeBuilder(arrow::default_memory_pool(), type, &builder));
+    StopIfNotOk(MakeBuilder(arrow::default_memory_pool(), type, &builder));
 
     VectorToArrayConverter converter{x, builder.get()};
-    STOP_IF_NOT_OK(arrow::VisitTypeInline(*type, &converter));
+    StopIfNotOk(arrow::VisitTypeInline(*type, &converter));
 
     std::shared_ptr<Array> result;
-    STOP_IF_NOT_OK(builder->Finish(&result));
+    StopIfNotOk(builder->Finish(&result));
     return result;
   }
 
@@ -227,8 +232,8 @@ std::shared_ptr<Array> MakeFactorArrayImpl(Rcpp::IntegerVector_ factor,
   using value_type = typename arrow::TypeTraits<Type>::ArrayType::value_type;
   auto n = factor.size();
 
-  std::shared_ptr<Buffer> indices_buffer;
-  STOP_IF_NOT_OK(AllocateBuffer(n * sizeof(value_type), &indices_buffer));
+  std::shared_ptr<Buffer> indices_buffer =
+      ValueOrStop(AllocateBuffer(n * sizeof(value_type)));
 
   std::vector<std::shared_ptr<Buffer>> buffers{nullptr, indices_buffer};
 
@@ -243,8 +248,7 @@ std::shared_ptr<Array> MakeFactorArrayImpl(Rcpp::IntegerVector_ factor,
 
   if (i < n) {
     // there are NA's so we need a null buffer
-    std::shared_ptr<Buffer> null_buffer;
-    STOP_IF_NOT_OK(AllocateBuffer(BitUtil::BytesForBits(n), &null_buffer));
+    auto null_buffer = ValueOrStop(AllocateBuffer(BitUtil::BytesForBits(n)));
     internal::FirstTimeBitmapWriter null_bitmap_writer(null_buffer->mutable_data(), 0, n);
 
     // catch up
@@ -274,9 +278,7 @@ std::shared_ptr<Array> MakeFactorArrayImpl(Rcpp::IntegerVector_ factor,
   SEXP levels = Rf_getAttrib(factor, R_LevelsSymbol);
   auto dict = MakeStringArray(levels, utf8());
 
-  std::shared_ptr<Array> out;
-  STOP_IF_NOT_OK(DictionaryArray::FromArrays(type, array_indices, dict, &out));
-  return out;
+  return ValueOrStop(DictionaryArray::FromArrays(type, array_indices, dict));
 }
 
 std::shared_ptr<Array> MakeFactorArray(Rcpp::IntegerVector_ factor,
@@ -293,12 +295,14 @@ std::shared_ptr<Array> MakeFactorArray(Rcpp::IntegerVector_ factor,
 }
 
 std::shared_ptr<Array> MakeStructArray(SEXP df, const std::shared_ptr<DataType>& type) {
-  int n = type->num_children();
+  int n = type->num_fields();
   std::vector<std::shared_ptr<Array>> children(n);
   for (int i = 0; i < n; i++) {
-    children[i] = Array__from_vector(VECTOR_ELT(df, i), type->child(i)->type(), true);
+    children[i] = Array__from_vector(VECTOR_ELT(df, i), type->field(i)->type(), true);
   }
-  return std::make_shared<StructArray>(type, children[0]->length(), children);
+
+  int64_t rows = n ? children[0]->length() : 0;
+  return std::make_shared<StructArray>(type, rows, children);
 }
 
 std::shared_ptr<Array> MakeListArray(SEXP x, const std::shared_ptr<DataType>& type) {
@@ -953,7 +957,14 @@ std::shared_ptr<arrow::DataType> InferArrowTypeFromVector<INTSXP>(SEXP x) {
   } else if (Rf_inherits(x, "Date")) {
     return date32();
   } else if (Rf_inherits(x, "POSIXct")) {
-    return timestamp(TimeUnit::MICRO, "GMT");
+    std::string tzone;
+    auto tzone_sexp = Rf_getAttrib(x, symbols::tzone);
+    if (Rf_isNull(tzone_sexp)) {
+      tzone = "";
+    } else {
+      tzone = CHAR(STRING_ELT(tzone_sexp, 0));
+    }
+    return timestamp(TimeUnit::MICRO, tzone);
   }
   return int32();
 }
@@ -964,7 +975,14 @@ std::shared_ptr<arrow::DataType> InferArrowTypeFromVector<REALSXP>(SEXP x) {
     return date32();
   }
   if (Rf_inherits(x, "POSIXct")) {
-    return timestamp(TimeUnit::MICRO, "GMT");
+    std::string tzone;
+    auto tzone_sexp = Rf_getAttrib(x, symbols::tzone);
+    if (Rf_isNull(tzone_sexp)) {
+      tzone = "";
+    } else {
+      tzone = CHAR(STRING_ELT(tzone_sexp, 0));
+    }
+    return timestamp(TimeUnit::MICRO, tzone);
   }
   if (Rf_inherits(x, "integer64")) {
     return int64();
@@ -1054,11 +1072,10 @@ std::shared_ptr<Array> MakeSimpleArray(SEXP x) {
                                                std::make_shared<RBuffer<RTYPE>>(vec)};
 
   int null_count = 0;
-  std::shared_ptr<Buffer> null_bitmap;
 
   auto first_na = std::find_if(p_vec_start, p_vec_end, is_na<value_type>);
   if (first_na < p_vec_end) {
-    STOP_IF_NOT_OK(AllocateBuffer(BitUtil::BytesForBits(n), &null_bitmap));
+    auto null_bitmap = ValueOrStop(AllocateBuffer(BitUtil::BytesForBits(n)));
     internal::FirstTimeBitmapWriter bitmap_writer(null_bitmap->mutable_data(), 0, n);
 
     // first loop to clear all the bits before the first NA
@@ -1122,7 +1139,7 @@ arrow::Status CheckCompatibleStruct(SEXP obj,
   }
 
   // check the number of columns
-  int num_fields = type->num_children();
+  int num_fields = type->num_fields();
   if (XLENGTH(obj) != num_fields) {
     return Status::RError("Number of fields in struct (", num_fields,
                           ") incompatible with number of columns in the data frame (",
@@ -1136,8 +1153,8 @@ arrow::Status CheckCompatibleStruct(SEXP obj,
   // when not compatible.
   SEXP names = Rf_getAttrib(obj, R_NamesSymbol);
   for (int i = 0; i < num_fields; i++) {
-    if (type->child(i)->name() != CHAR(STRING_ELT(names, i))) {
-      return Status::RError("Field name in position ", i, " (", type->child(i)->name(),
+    if (type->field(i)->name() != CHAR(STRING_ELT(names, i))) {
+      return Status::RError("Field name in position ", i, " (", type->field(i)->name(),
                             ") does not match the name of the column of the data frame (",
                             CHAR(STRING_ELT(names, i)), ")");
     }
@@ -1180,7 +1197,7 @@ std::shared_ptr<arrow::Array> Array__from_vector(
   // struct types
   if (type->id() == Type::STRUCT) {
     if (!type_inferred) {
-      STOP_IF_NOT_OK(arrow::r::CheckCompatibleStruct(x, type));
+      StopIfNotOk(arrow::r::CheckCompatibleStruct(x, type));
     }
 
     return arrow::r::MakeStructArray(x, type);
@@ -1188,17 +1205,17 @@ std::shared_ptr<arrow::Array> Array__from_vector(
 
   // general conversion with converter and builder
   std::unique_ptr<arrow::r::VectorConverter> converter;
-  STOP_IF_NOT_OK(arrow::r::GetConverter(type, &converter));
+  StopIfNotOk(arrow::r::GetConverter(type, &converter));
 
   // Create ArrayBuilder for type
   std::unique_ptr<arrow::ArrayBuilder> type_builder;
-  STOP_IF_NOT_OK(arrow::MakeBuilder(arrow::default_memory_pool(), type, &type_builder));
-  STOP_IF_NOT_OK(converter->Init(type_builder.get()));
+  StopIfNotOk(arrow::MakeBuilder(arrow::default_memory_pool(), type, &type_builder));
+  StopIfNotOk(converter->Init(type_builder.get()));
 
   // ingest R data and grab the result array
-  STOP_IF_NOT_OK(converter->Ingest(x));
+  StopIfNotOk(converter->Ingest(x));
   std::shared_ptr<arrow::Array> result;
-  STOP_IF_NOT_OK(converter->GetResult(&result));
+  StopIfNotOk(converter->GetResult(&result));
 
   return result;
 }
@@ -1249,8 +1266,8 @@ std::shared_ptr<arrow::ChunkedArray> ChunkedArray__from_list(Rcpp::List chunks,
   if (n == 0) {
     std::shared_ptr<arrow::Array> array;
     std::unique_ptr<arrow::ArrayBuilder> type_builder;
-    STOP_IF_NOT_OK(arrow::MakeBuilder(arrow::default_memory_pool(), type, &type_builder));
-    STOP_IF_NOT_OK(type_builder->Finish(&array));
+    StopIfNotOk(arrow::MakeBuilder(arrow::default_memory_pool(), type, &type_builder));
+    StopIfNotOk(type_builder->Finish(&array));
     vec.push_back(array);
   } else {
     // the first - might differ from the rest of the loop
@@ -1273,9 +1290,7 @@ std::shared_ptr<arrow::Array> DictionaryArray__FromArrays(
     const std::shared_ptr<arrow::DataType>& type,
     const std::shared_ptr<arrow::Array>& indices,
     const std::shared_ptr<arrow::Array>& dict) {
-  std::shared_ptr<arrow::Array> out;
-  STOP_IF_NOT_OK(arrow::DictionaryArray::FromArrays(type, indices, dict, &out));
-  return out;
+  return ValueOrStop(arrow::DictionaryArray::FromArrays(type, indices, dict));
 }
 
 #endif

@@ -16,6 +16,7 @@
 // under the License.
 
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -24,11 +25,11 @@
 #include <vector>
 
 #include "arrow/array.h"
-#include "arrow/compute/api.h"
 #include "arrow/testing/gtest_util.h"
 #include "arrow/testing/random.h"
 #include "arrow/testing/util.h"
 #include "arrow/type.h"
+#include "arrow/util/bit_util.h"
 #include "arrow/util/checked_cast.h"
 
 #include "parquet/encoding.h"
@@ -130,10 +131,30 @@ void VerifyResults(T* result, T* expected, int num_values) {
   }
 }
 
+template <typename T>
+void VerifyResultsSpaced(T* result, T* expected, int num_values, uint8_t* valid_bits,
+                         int64_t valid_bits_offset) {
+  for (auto i = 0; i < num_values; ++i) {
+    if (BitUtil::GetBit(valid_bits, valid_bits_offset + i)) {
+      ASSERT_EQ(expected[i], result[i]) << i;
+    }
+  }
+}
+
 template <>
 void VerifyResults<FLBA>(FLBA* result, FLBA* expected, int num_values) {
   for (int i = 0; i < num_values; ++i) {
     ASSERT_EQ(0, memcmp(expected[i].ptr, result[i].ptr, flba_length)) << i;
+  }
+}
+
+template <>
+void VerifyResultsSpaced<FLBA>(FLBA* result, FLBA* expected, int num_values,
+                               uint8_t* valid_bits, int64_t valid_bits_offset) {
+  for (auto i = 0; i < num_values; ++i) {
+    if (BitUtil::GetBit(valid_bits, valid_bits_offset + i)) {
+      ASSERT_EQ(0, memcmp(expected[i].ptr, result[i].ptr, flba_length)) << i;
+    }
   }
 }
 
@@ -189,9 +210,22 @@ class TestEncodingBase : public ::testing::Test {
 
   virtual void CheckRoundtrip() = 0;
 
+  virtual void CheckRoundtripSpaced(int64_t valid_bits_offset) {}
+
   void Execute(int nvalues, int repeats) {
     InitData(nvalues, repeats);
     CheckRoundtrip();
+  }
+
+  void ExecuteSpaced(int nvalues, int repeats, int64_t valid_bits_offset) {
+    InitData(nvalues, repeats);
+    auto num_value_valid_bits_buffer =
+        static_cast<int>(arrow::BitUtil::BytesForBits(num_values_ + valid_bits_offset));
+    valid_bits_buffer_.resize(num_value_valid_bits_buffer * sizeof(uint8_t));
+    // Random initialization the valid bits map
+    random_bytes(num_value_valid_bits_buffer, 0, &valid_bits_buffer_);
+    valid_bits_ = valid_bits_buffer_.data();
+    CheckRoundtripSpaced(valid_bits_offset);
   }
 
  protected:
@@ -204,6 +238,9 @@ class TestEncodingBase : public ::testing::Test {
   std::vector<uint8_t> input_bytes_;
   std::vector<uint8_t> output_bytes_;
   std::vector<uint8_t> data_buffer_;
+
+  uint8_t* valid_bits_;  // valid bits map for spaced
+  std::vector<uint8_t> valid_bits_buffer_;
 
   std::shared_ptr<Buffer> encode_buffer_;
   std::shared_ptr<ColumnDescriptor> descr_;
@@ -219,7 +256,8 @@ class TestEncodingBase : public ::testing::Test {
   using TestEncodingBase<Type>::data_buffer_;   \
   using TestEncodingBase<Type>::type_length_;   \
   using TestEncodingBase<Type>::encode_buffer_; \
-  using TestEncodingBase<Type>::decode_buf_
+  using TestEncodingBase<Type>::decode_buf_;    \
+  using TestEncodingBase<Type>::valid_bits_
 
 template <typename Type>
 class TestPlainEncoding : public TestEncodingBase<Type> {
@@ -240,14 +278,51 @@ class TestPlainEncoding : public TestEncodingBase<Type> {
     ASSERT_NO_FATAL_FAILURE(VerifyResults<T>(decode_buf_, draws_, num_values_));
   }
 
+  void CheckRoundtripSpaced(int64_t valid_bits_offset) {
+    auto encoder = MakeTypedEncoder<Type>(Encoding::PLAIN, false, descr_.get());
+    auto decoder = MakeTypedDecoder<Type>(Encoding::PLAIN, descr_.get());
+    int null_count = 0;
+    for (auto i = 0; i < num_values_; i++) {
+      if (!BitUtil::GetBit(valid_bits_, valid_bits_offset + i)) {
+        null_count++;
+      }
+    }
+
+    encoder->PutSpaced(draws_, num_values_, valid_bits_, valid_bits_offset);
+    encode_buffer_ = encoder->FlushValues();
+    decoder->SetData(num_values_ - null_count, encode_buffer_->data(),
+                     static_cast<int>(encode_buffer_->size()));
+    auto values_decoded = decoder->DecodeSpaced(decode_buf_, num_values_, null_count,
+                                                valid_bits_, valid_bits_offset);
+    ASSERT_EQ(num_values_, values_decoded);
+    ASSERT_NO_FATAL_FAILURE(VerifyResultsSpaced<T>(decode_buf_, draws_, num_values_,
+                                                   valid_bits_, valid_bits_offset));
+  }
+
  protected:
   USING_BASE_MEMBERS();
 };
 
-TYPED_TEST_CASE(TestPlainEncoding, ParquetTypes);
+TYPED_TEST_SUITE(TestPlainEncoding, ParquetTypes);
 
 TYPED_TEST(TestPlainEncoding, BasicRoundTrip) {
   ASSERT_NO_FATAL_FAILURE(this->Execute(10000, 1));
+
+  // Spaced test with different sizes and offest to guarantee SIMD implementation
+  constexpr int kAvx512Size = 64;         // sizeof(__m512i) for Avx512
+  constexpr int kSimdSize = kAvx512Size;  // Current the max is Avx512
+  constexpr int kMultiSimdSize = kSimdSize * 33;
+
+  // Test with both size and offset up to 3 Simd block
+  for (auto i = 1; i < kSimdSize * 3; i++) {
+    ASSERT_NO_FATAL_FAILURE(this->ExecuteSpaced(i, 1, 0));
+    ASSERT_NO_FATAL_FAILURE(this->ExecuteSpaced(i, 1, i + 1));
+  }
+  // Large block and offset
+  ASSERT_NO_FATAL_FAILURE(this->ExecuteSpaced(kMultiSimdSize, 1, 0));
+  ASSERT_NO_FATAL_FAILURE(this->ExecuteSpaced(kMultiSimdSize + 33, 1, 0));
+  ASSERT_NO_FATAL_FAILURE(this->ExecuteSpaced(kMultiSimdSize, 1, 33));
+  ASSERT_NO_FATAL_FAILURE(this->ExecuteSpaced(kMultiSimdSize + 33, 1, 33));
 }
 
 // ----------------------------------------------------------------------
@@ -316,7 +391,7 @@ class TestDictionaryEncoding : public TestEncodingBase<Type> {
   std::shared_ptr<ResizableBuffer> dict_buffer_;
 };
 
-TYPED_TEST_CASE(TestDictionaryEncoding, DictEncodedTypes);
+TYPED_TEST_SUITE(TestDictionaryEncoding, DictEncodedTypes);
 
 TYPED_TEST(TestDictionaryEncoding, BasicRoundTrip) {
   ASSERT_NO_FATAL_FAILURE(this->Execute(2500, 2));
@@ -353,7 +428,7 @@ class TestArrowBuilderDecoding : public ::testing::Test {
 
     num_values_ = static_cast<int>(expected_dense_->length());
     null_count_ = static_cast<int>(expected_dense_->null_count());
-    valid_bits_ = expected_dense_->null_bitmap()->data();
+    valid_bits_ = expected_dense_->null_bitmap_data();
 
     auto builder = CreateDictBuilder();
     ASSERT_OK(builder->AppendArray(*expected_dense_));
@@ -459,7 +534,12 @@ class PlainEncoding : public TestArrowBuilderDecoding {
     encoder_ = MakeTypedEncoder<ByteArrayType>(Encoding::PLAIN);
     plain_decoder_ = MakeTypedDecoder<ByteArrayType>(Encoding::PLAIN);
     decoder_ = plain_decoder_.get();
-    ASSERT_NO_THROW(encoder_->PutSpaced(input_data_.data(), num_values_, valid_bits_, 0));
+    if (valid_bits_ != nullptr) {
+      ASSERT_NO_THROW(
+          encoder_->PutSpaced(input_data_.data(), num_values_, valid_bits_, 0));
+    } else {
+      ASSERT_NO_THROW(encoder_->Put(input_data_.data(), num_values_));
+    }
     buffer_ = encoder_->FlushValues();
     decoder_->SetData(num_values_, buffer_->data(), static_cast<int>(buffer_->size()));
   }
@@ -569,6 +649,35 @@ class EncodingAdHocTyped : public ::testing::Test {
     auto encoder = MakeTypedEncoder<ParquetType>(
         Encoding::PLAIN, /*use_dictionary=*/false, column_descr());
     auto decoder = MakeTypedDecoder<ParquetType>(Encoding::PLAIN, column_descr());
+
+    ASSERT_NO_THROW(encoder->Put(*values));
+    auto buf = encoder->FlushValues();
+
+    int num_values = static_cast<int>(values->length() - values->null_count());
+    decoder->SetData(num_values, buf->data(), static_cast<int>(buf->size()));
+
+    BuilderType acc(arrow_type(), arrow::default_memory_pool());
+    ASSERT_EQ(num_values,
+              decoder->DecodeArrow(static_cast<int>(values->length()),
+                                   static_cast<int>(values->null_count()),
+                                   values->null_bitmap_data(), values->offset(), &acc));
+
+    std::shared_ptr<::arrow::Array> result;
+    ASSERT_OK(acc.Finish(&result));
+    ASSERT_EQ(50, result->length());
+    arrow::AssertArraysEqual(*values, *result);
+  }
+
+  void ByteStreamSplit(int seed) {
+    if (!std::is_same<ParquetType, FloatType>::value &&
+        !std::is_same<ParquetType, DoubleType>::value) {
+      return;
+    }
+    auto values = GetValues(seed);
+    auto encoder = MakeTypedEncoder<ParquetType>(
+        Encoding::BYTE_STREAM_SPLIT, /*use_dictionary=*/false, column_descr());
+    auto decoder =
+        MakeTypedDecoder<ParquetType>(Encoding::BYTE_STREAM_SPLIT, column_descr());
 
     ASSERT_NO_THROW(encoder->Put(*values));
     auto buf = encoder->FlushValues();
@@ -703,18 +812,25 @@ std::shared_ptr<arrow::Array> EncodingAdHocTyped<FLBAType>::GetValues(int seed) 
   std::shared_ptr<arrow::Array> values;
   ARROW_EXPECT_OK(
       rag.UInt64(size_, 0, std::numeric_limits<uint64_t>::max(), null_probability_)
-          ->View(arrow_type(), &values));
+          ->View(arrow_type())
+          .Value(&values));
   return values;
 }
 
 using EncodingAdHocTypedCases =
     ::testing::Types<BooleanType, Int32Type, Int64Type, FloatType, DoubleType, FLBAType>;
 
-TYPED_TEST_CASE(EncodingAdHocTyped, EncodingAdHocTypedCases);
+TYPED_TEST_SUITE(EncodingAdHocTyped, EncodingAdHocTypedCases);
 
 TYPED_TEST(EncodingAdHocTyped, PlainArrowDirectPut) {
   for (auto seed : {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}) {
     this->Plain(seed);
+  }
+}
+
+TYPED_TEST(EncodingAdHocTyped, ByteStreamSplitArrowDirectPut) {
+  for (auto seed : {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}) {
+    this->ByteStreamSplit(seed);
   }
 }
 
@@ -803,7 +919,12 @@ class DictEncoding : public TestArrowBuilderDecoding {
     descr_ = std::unique_ptr<ColumnDescriptor>(new ColumnDescriptor(node, 0, 0));
     encoder_ = MakeTypedEncoder<ByteArrayType>(Encoding::PLAIN, /*use_dictionary=*/true,
                                                descr_.get());
-    ASSERT_NO_THROW(encoder_->PutSpaced(input_data_.data(), num_values_, valid_bits_, 0));
+    if (null_count_ == 0) {
+      ASSERT_NO_THROW(encoder_->Put(input_data_.data(), num_values_));
+    } else {
+      ASSERT_NO_THROW(
+          encoder_->PutSpaced(input_data_.data(), num_values_, valid_bits_, 0));
+    }
     buffer_ = encoder_->FlushValues();
 
     auto dict_encoder = dynamic_cast<DictEncoder<ByteArrayType>*>(encoder_.get());
@@ -850,9 +971,28 @@ TEST_F(DictEncoding, CheckDecodeIndicesSpaced) {
     InitTestCase(np);
     auto builder = CreateDictBuilder();
     dict_decoder_->InsertDictionary(builder.get());
-    auto actual_num_values = dict_decoder_->DecodeIndicesSpaced(
-        num_values_, null_count_, valid_bits_, 0, builder.get());
-    CheckDict(actual_num_values, *builder);
+    int actual_num_values;
+    if (null_count_ == 0) {
+      actual_num_values = dict_decoder_->DecodeIndices(num_values_, builder.get());
+    } else {
+      actual_num_values = dict_decoder_->DecodeIndicesSpaced(
+          num_values_, null_count_, valid_bits_, 0, builder.get());
+    }
+    ASSERT_EQ(actual_num_values, num_values_ - null_count_);
+    std::shared_ptr<arrow::Array> actual;
+    ASSERT_OK(builder->Finish(&actual));
+    ASSERT_ARRAYS_EQUAL(*actual, *expected_dict_);
+
+    // Check that null indices are zero-initialized
+    const auto& dict_actual = checked_cast<const arrow::DictionaryArray&>(*actual);
+    const auto& indices = checked_cast<const arrow::Int32Array&>(*dict_actual.indices());
+
+    auto raw_values = indices.raw_values();
+    for (int64_t i = 0; i < indices.length(); ++i) {
+      if (indices.IsNull(i) && raw_values[i] != 0) {
+        FAIL() << "Null slot not zero-initialized";
+      }
+    }
   }
 }
 
@@ -867,158 +1007,196 @@ TEST_F(DictEncoding, CheckDecodeIndicesNoNulls) {
 // ----------------------------------------------------------------------
 // BYTE_STREAM_SPLIT encode/decode tests.
 
-template <typename DType>
-void TestByteStreamSplitDecodePath(const uint8_t* encoded_data,
-                                   const int64_t encoded_data_size,
-                                   const typename DType::c_type* expected_decoded_data,
-                                   const int num_elements,
-                                   const bool request_more_values) {
-  std::unique_ptr<TypedDecoder<DType>> decoder =
-      MakeTypedDecoder<DType>(Encoding::BYTE_STREAM_SPLIT);
-  decoder->SetData(num_elements, encoded_data, static_cast<int>(encoded_data_size));
-  std::vector<typename DType::c_type> decoded_data(num_elements);
-  int num_elements_to_decode = num_elements;
-  if (request_more_values) {
-    num_elements_to_decode += 100;
-  }
-  int num_decoded_elements = decoder->Decode(decoded_data.data(), num_elements_to_decode);
-  ASSERT_EQ(num_elements, num_decoded_elements);
-  for (size_t i = 0U; i < decoded_data.size(); ++i) {
-    ASSERT_EQ(expected_decoded_data[i], decoded_data[i]);
-  }
-  ASSERT_EQ(0, decoder->values_left());
-}
+template <typename Type>
+class TestByteStreamSplitEncoding : public TestEncodingBase<Type> {
+ public:
+  typedef typename Type::c_type T;
+  static constexpr int TYPE = Type::type_num;
 
-template <typename DType>
-void TestByteStreamSplitRoundTrip(const typename DType::c_type* input_data, const int n) {
-  auto encoder = MakeTypedEncoder<DType>(Encoding::BYTE_STREAM_SPLIT);
-  encoder->Put(input_data, n);
-  const int64_t estimated_num_bytes = encoder->EstimatedDataEncodedSize();
-  ASSERT_EQ(static_cast<int64_t>(n) * sizeof(typename DType::c_type),
-            estimated_num_bytes);
-  std::shared_ptr<Buffer> buffer = encoder->FlushValues();
-  TestByteStreamSplitDecodePath<DType>(buffer->data(), buffer->size(), input_data, n,
-                                       false);
-}
+  void CheckRoundtrip() override {
+    auto encoder =
+        MakeTypedEncoder<Type>(Encoding::BYTE_STREAM_SPLIT, false, descr_.get());
+    auto decoder = MakeTypedDecoder<Type>(Encoding::BYTE_STREAM_SPLIT, descr_.get());
+    encoder->Put(draws_, num_values_);
+    encode_buffer_ = encoder->FlushValues();
 
-template <typename DType>
-void TestEncodeDecodeWithBigInput() {
-  const int nvalues = 10000;
-  using T = typename DType::c_type;
-  std::vector<T> data(nvalues);
-  GenerateData<T>(nvalues, data.data(), nullptr);
-  TestByteStreamSplitRoundTrip<DType>(data.data(), nvalues);
-}
+    {
+      decoder->SetData(num_values_, encode_buffer_->data(),
+                       static_cast<int>(encode_buffer_->size()));
+      int values_decoded = decoder->Decode(decode_buf_, num_values_);
+      ASSERT_EQ(num_values_, values_decoded);
+      ASSERT_NO_FATAL_FAILURE(VerifyResults<T>(decode_buf_, draws_, num_values_));
+    }
 
-// Check that the encoder can handle input with one element.
-TEST(ByteStreamSplitEncodeDecode, EncodeOneLenInput) {
-  const float value = 1.0f;
-  TestByteStreamSplitRoundTrip<FloatType>(&value, 1);
-}
+    {
+      // Try again but with a small step.
+      decoder->SetData(num_values_, encode_buffer_->data(),
+                       static_cast<int>(encode_buffer_->size()));
+      int step = 131;
+      int remaining = num_values_;
+      for (int i = 0; i < num_values_; i += step) {
+        int num_decoded = decoder->Decode(decode_buf_, step);
+        ASSERT_EQ(num_decoded, std::min(step, remaining));
+        ASSERT_NO_FATAL_FAILURE(VerifyResults<T>(decode_buf_, &draws_[i], num_decoded));
+        remaining -= num_decoded;
+      }
+    }
 
-// Check that the decoder can handle empty input.
-TEST(ByteStreamSplitEncodeDecode, DecodeZeroLenInput) {
-  std::unique_ptr<TypedDecoder<FloatType>> decoder =
-      MakeTypedDecoder<FloatType>(Encoding::BYTE_STREAM_SPLIT);
-  decoder->SetData(0, NULL, 0);
-  ASSERT_EQ(0U, decoder->Decode(NULL, 0));
-}
+    {
+      std::vector<uint8_t> valid_bits(arrow::BitUtil::BytesForBits(num_values_), 0);
+      std::vector<T> expected_filtered_output;
+      const int every_nth = 5;
+      expected_filtered_output.reserve((num_values_ + every_nth - 1) / every_nth);
+      arrow::internal::BitmapWriter writer{valid_bits.data(), 0, num_values_};
+      // Set every fifth bit.
+      for (int i = 0; i < num_values_; ++i) {
+        if (i % every_nth == 0) {
+          writer.Set();
+          expected_filtered_output.push_back(draws_[i]);
+        }
+        writer.Next();
+      }
+      writer.Finish();
+      const int expected_size = static_cast<int>(expected_filtered_output.size());
+      ASSERT_NO_THROW(encoder->PutSpaced(draws_, num_values_, valid_bits.data(), 0));
+      encode_buffer_ = encoder->FlushValues();
 
-TEST(ByteStreamSplitEncodeDecode, DecodeOneLenInput) {
-  const uint8_t data[] = {0x47U, 0x24U, 0xa7U, 0x44U};
-  TestByteStreamSplitDecodePath<FloatType>(
-      data, 4, reinterpret_cast<const float*>(&data[0]), 1, false);
-}
-
-// Check that requesting to decode more elements than is available in the storage
-// of the decoder works correctly.
-TEST(ByteStreamSplitEncodeDecode, DecodeLargerPortion) {
-  const uint8_t data[] = {0xDEU, 0xC0U, 0x37U, 0x13U, 0x11U, 0x22U, 0x33U, 0x44U,
-                          0xAAU, 0xBBU, 0xCCU, 0xDDU, 0x55U, 0x66U, 0x77U, 0x88U};
-  const uint64_t expected_output[2] = {0x7755CCAA331137DEULL, 0x8866DDBB442213C0ULL};
-  TestByteStreamSplitDecodePath<DoubleType>(
-      data, sizeof(data), reinterpret_cast<const double*>(&expected_output[0]), 2, true);
-}
-
-// Check that the decoder can decode the input in smaller steps.
-TEST(ByteStreamSplitEncodeDecode, DecodeMultipleTimes) {
-  std::unique_ptr<TypedDecoder<FloatType>> decoder =
-      MakeTypedDecoder<FloatType>(Encoding::BYTE_STREAM_SPLIT);
-  const int num_values = 100;
-  std::vector<uint8_t> data(num_values * 4);
-  for (size_t i = 0; i < data.size(); ++i) {
-    data[i] = static_cast<uint8_t>(i & 0xFFU);
-  }
-  decoder->SetData(num_values, data.data(), num_values * 4);
-
-  const int step = 25;
-  std::vector<float> decoded_data(step);
-  for (int i = 0; i < num_values; i += step) {
-    int num_decoded = decoder->Decode(decoded_data.data(), step);
-    ASSERT_EQ(step, num_decoded);
-    for (int j = 0; j < step; ++j) {
-      const uint32_t assembled_value =
-          static_cast<uint32_t>(data[i + j]) |
-          (static_cast<uint32_t>(data[(i + j) + num_values]) << 8U) |
-          (static_cast<uint32_t>(data[(i + j) + num_values * 2]) << 16U) |
-          (static_cast<uint32_t>(data[(i + j) + num_values * 3]) << 24U);
-      const float assembled_value_as_float =
-          *reinterpret_cast<const float*>(&assembled_value);
-      ASSERT_EQ(assembled_value_as_float, decoded_data[j]);
+      decoder->SetData(expected_size, encode_buffer_->data(),
+                       static_cast<int>(encode_buffer_->size()));
+      int values_decoded = decoder->Decode(decode_buf_, num_values_);
+      ASSERT_EQ(expected_size, values_decoded);
+      ASSERT_NO_FATAL_FAILURE(
+          VerifyResults<T>(decode_buf_, expected_filtered_output.data(), expected_size));
     }
   }
+
+  void CheckDecode();
+  void CheckEncode();
+
+ protected:
+  USING_BASE_MEMBERS();
+
+  void CheckDecode(const uint8_t* encoded_data, const int64_t encoded_data_size,
+                   const T* expected_decoded_data, const int num_elements) {
+    std::unique_ptr<TypedDecoder<Type>> decoder =
+        MakeTypedDecoder<Type>(Encoding::BYTE_STREAM_SPLIT);
+    decoder->SetData(num_elements, encoded_data, static_cast<int>(encoded_data_size));
+    std::vector<T> decoded_data(num_elements);
+    int num_decoded_elements = decoder->Decode(decoded_data.data(), num_elements);
+    ASSERT_EQ(num_elements, num_decoded_elements);
+    for (size_t i = 0U; i < decoded_data.size(); ++i) {
+      ASSERT_EQ(expected_decoded_data[i], decoded_data[i]);
+    }
+    ASSERT_EQ(0, decoder->values_left());
+  }
+
+  void CheckEncode(const T* data, const int num_elements,
+                   const uint8_t* expected_encoded_data,
+                   const int64_t encoded_data_size) {
+    std::unique_ptr<TypedEncoder<Type>> encoder =
+        MakeTypedEncoder<Type>(Encoding::BYTE_STREAM_SPLIT);
+    encoder->Put(data, num_elements);
+    auto encoded_data = encoder->FlushValues();
+    ASSERT_EQ(encoded_data_size, encoded_data->size());
+    const uint8_t* encoded_data_raw = encoded_data->data();
+    for (int64_t i = 0; i < encoded_data->size(); ++i) {
+      ASSERT_EQ(expected_encoded_data[i], encoded_data_raw[i]);
+    }
+  }
+};
+
+template <typename T>
+static std::vector<T> ToLittleEndian(const std::vector<T>& input) {
+  std::vector<T> data(input.size());
+  std::transform(input.begin(), input.end(), data.begin(),
+                 [](const T& value) { return ::arrow::BitUtil::ToLittleEndian(value); });
+  return data;
 }
 
-// Check that an encode-decode pipeline produces the original small input.
-// This small-input test is added to ease debugging in case of changes to
-// the encoder/decoder implementation.
-TEST(ByteStreamSplitEncodeDecode, SmallInput) {
-  const float data[] = {-166.166f, -0.2566f, .0f, 322.0f, 178888.189f};
-  const int num_values = sizeof(data) / sizeof(data[0U]);
-  TestByteStreamSplitRoundTrip<FloatType>(data, num_values);
+static_assert(sizeof(float) == sizeof(uint32_t),
+              "BYTE_STREAM_SPLIT encoding tests assume float / uint32_t type sizes");
+static_assert(sizeof(double) == sizeof(uint64_t),
+              "BYTE_STREAM_SPLIT encoding tests assume double / uint64_t type sizes");
+
+template <>
+void TestByteStreamSplitEncoding<FloatType>::CheckDecode() {
+  const uint8_t data[] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+                          0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC};
+  const auto expected_output =
+      ToLittleEndian<uint32_t>({0xAA774411U, 0xBB885522U, 0xCC996633U});
+  CheckDecode(data, static_cast<int64_t>(sizeof(data)),
+              reinterpret_cast<const float*>(expected_output.data()),
+              static_cast<int>(sizeof(data) / sizeof(float)));
 }
 
-TEST(ByteStreamSplitEncodeDecode, PutSpaced) {
-  const float data[] = {-1.0f, .0f,       .0f, 3.0f,          .0f,       22.1234f,
-                        .0f,   198891.0f, .0f, -223345.4455f, 24443.124f};
-  const float valid_data[] = {-1.0f,     3.0f,          22.1234f,
-                              198891.0f, -223345.4455f, 24443.124f};
-  // The valid ones are the ones which are non-zero.
-  // The enable bits are: 10010101 011.
-  const uint8_t valid_bits[2] = {0xA9U, 0x6U};
-  const int num_values = sizeof(data) / sizeof(data[0U]);
-  const int num_valid_values = sizeof(valid_data) / sizeof(valid_data[0U]);
-  std::unique_ptr<TypedEncoder<FloatType>> encoder =
-      MakeTypedEncoder<FloatType>(Encoding::BYTE_STREAM_SPLIT);
-  encoder->PutSpaced(data, num_values, valid_bits, 0);
-  std::shared_ptr<Buffer> buffer = encoder->FlushValues();
-
-  TestByteStreamSplitDecodePath<FloatType>(buffer->data(), buffer->size(), valid_data,
-                                           num_valid_values, false);
+template <>
+void TestByteStreamSplitEncoding<DoubleType>::CheckDecode() {
+  const uint8_t data[] = {0xDE, 0xC0, 0x37, 0x13, 0x11, 0x22, 0x33, 0x44,
+                          0xAA, 0xBB, 0xCC, 0xDD, 0x55, 0x66, 0x77, 0x88};
+  const auto expected_output =
+      ToLittleEndian<uint64_t>({0x7755CCAA331137DEULL, 0x8866DDBB442213C0ULL});
+  CheckDecode(data, static_cast<int64_t>(sizeof(data)),
+              reinterpret_cast<const double*>(expected_output.data()),
+              static_cast<int>(sizeof(data) / sizeof(double)));
 }
 
-TEST(ByteStreamSplitEncodeDecode, PutArrow) {
-  arrow::random::RandomArrayGenerator rag{1337};
-  const int num_values = 123;
-  auto arr = rag.Float32(num_values, -2048.0f, 2048.0f, 0);
-  std::unique_ptr<TypedEncoder<FloatType>> encoder =
-      MakeTypedEncoder<FloatType>(Encoding::BYTE_STREAM_SPLIT);
-  encoder->Put(*arr);
-  std::shared_ptr<Buffer> buffer = encoder->FlushValues();
-
-  auto raw_values = checked_cast<const arrow::FloatArray&>(*arr).raw_values();
-  TestByteStreamSplitDecodePath<FloatType>(buffer->data(), buffer->size(), raw_values,
-                                           num_values, false);
+template <>
+void TestByteStreamSplitEncoding<DoubleType>::CheckEncode() {
+  const auto data = ToLittleEndian<uint64_t>(
+      {0x4142434445464748ULL, 0x0102030405060708ULL, 0xb1b2b3b4b5b6b7b8ULL});
+  const uint8_t expected_output[24] = {
+      0x48, 0x08, 0xb8, 0x47, 0x07, 0xb7, 0x46, 0x06, 0xb6, 0x45, 0x05, 0xb5,
+      0x44, 0x04, 0xb4, 0x43, 0x03, 0xb3, 0x42, 0x02, 0xb2, 0x41, 0x01, 0xb1,
+  };
+  CheckEncode(reinterpret_cast<const double*>(data.data()), static_cast<int>(data.size()),
+              expected_output, sizeof(expected_output));
 }
 
-// Test that the encode-decode pipeline can handle big 32-bit FP input.
-TEST(ByteStreamSplitEncodeDecode, BigInputFloat) {
-  TestEncodeDecodeWithBigInput<FloatType>();
+template <>
+void TestByteStreamSplitEncoding<FloatType>::CheckEncode() {
+  const auto data = ToLittleEndian<uint32_t>({0xaabbccdd, 0x11223344});
+  const uint8_t expected_output[8] = {0xdd, 0x44, 0xcc, 0x33, 0xbb, 0x22, 0xaa, 0x11};
+  CheckEncode(reinterpret_cast<const float*>(data.data()), static_cast<int>(data.size()),
+              expected_output, sizeof(expected_output));
 }
 
-// Test that the encode-decode pipeline can handle big 64-bit FP input.
-TEST(ByteStreamSplitEncodeDecode, BigInputDouble) {
-  TestEncodeDecodeWithBigInput<DoubleType>();
+typedef ::testing::Types<FloatType, DoubleType> ByteStreamSplitTypes;
+TYPED_TEST_SUITE(TestByteStreamSplitEncoding, ByteStreamSplitTypes);
+
+TYPED_TEST(TestByteStreamSplitEncoding, BasicRoundTrip) {
+  for (int values = 0; values < 32; ++values) {
+    ASSERT_NO_FATAL_FAILURE(this->Execute(values, 1));
+  }
+
+  // We need to test with different sizes to guarantee that the SIMD implementation
+  // can handle both inputs with size divisible by 4/8 and sizes which would
+  // require a scalar loop for the suffix.
+  constexpr size_t kSuffixSize = 7;
+  constexpr size_t kAvx2Size = 32;    // sizeof(__m256i) for AVX2
+  constexpr size_t kAvx512Size = 64;  // sizeof(__m512i) for AVX512
+  constexpr size_t kMultiSimdSize = kAvx512Size * 7;
+
+  // Exercise only one SIMD loop. SSE and AVX2 covered in above loop.
+  ASSERT_NO_FATAL_FAILURE(this->Execute(kAvx512Size, 1));
+  // Exercise one SIMD loop with suffix. SSE covered in above loop.
+  ASSERT_NO_FATAL_FAILURE(this->Execute(kAvx2Size + kSuffixSize, 1));
+  ASSERT_NO_FATAL_FAILURE(this->Execute(kAvx512Size + kSuffixSize, 1));
+  // Exercise multi SIMD loop.
+  ASSERT_NO_FATAL_FAILURE(this->Execute(kMultiSimdSize, 1));
+  // Exercise multi SIMD loop with suffix.
+  ASSERT_NO_FATAL_FAILURE(this->Execute(kMultiSimdSize + kSuffixSize, 1));
+}
+
+TYPED_TEST(TestByteStreamSplitEncoding, RoundTripSingleElement) {
+  ASSERT_NO_FATAL_FAILURE(this->Execute(1, 1));
+}
+
+TYPED_TEST(TestByteStreamSplitEncoding, CheckOnlyDecode) {
+  ASSERT_NO_FATAL_FAILURE(this->CheckDecode());
+}
+
+TYPED_TEST(TestByteStreamSplitEncoding, CheckOnlyEncode) {
+  ASSERT_NO_FATAL_FAILURE(this->CheckEncode());
 }
 
 TEST(ByteStreamSplitEncodeDecode, InvalidDataTypes) {

@@ -26,38 +26,37 @@
 #include "arrow/type_fwd.h"
 #include "arrow/util/macros.h"
 #include "arrow/util/string_view.h"
+#include "arrow/util/type_fwd.h"
 #include "arrow/util/visibility.h"
 
 namespace arrow {
 namespace io {
 
-/// DEPRECATED.  Use the FileSystem API in arrow::fs instead.
-struct ObjectType {
-  enum type { FILE, DIRECTORY };
+struct ReadRange {
+  int64_t offset;
+  int64_t length;
+
+  friend bool operator==(const ReadRange& left, const ReadRange& right) {
+    return (left.offset == right.offset && left.length == right.length);
+  }
+  friend bool operator!=(const ReadRange& left, const ReadRange& right) {
+    return !(left == right);
+  }
+
+  bool Contains(const ReadRange& other) const {
+    return (offset <= other.offset && offset + length >= other.offset + other.length);
+  }
 };
 
-/// DEPRECATED.  Use the FileSystem API in arrow::fs instead.
-struct ARROW_EXPORT FileStatistics {
-  /// Size of file, -1 if finding length is unsupported
-  int64_t size;
-  ObjectType::type kind;
-};
+// EXPERIMENTAL
+struct ARROW_EXPORT AsyncContext {
+  ::arrow::internal::Executor* executor;
+  // An application-specific ID, forwarded to executor task submissions
+  int64_t external_id = -1;
 
-/// DEPRECATED.  Use the FileSystem API in arrow::fs instead.
-class ARROW_EXPORT FileSystem {
- public:
-  virtual ~FileSystem() = default;
-
-  virtual Status MakeDirectory(const std::string& path) = 0;
-
-  virtual Status DeleteDirectory(const std::string& path) = 0;
-
-  virtual Status GetChildren(const std::string& path,
-                             std::vector<std::string>* listing) = 0;
-
-  virtual Status Rename(const std::string& src, const std::string& dst) = 0;
-
-  virtual Status Stat(const std::string& path, FileStatistics* stat) = 0;
+  // Set `executor` to a global IO-specific thread pool.
+  AsyncContext();
+  explicit AsyncContext(::arrow::internal::Executor* executor);
 };
 
 class ARROW_EXPORT FileInterface {
@@ -90,10 +89,6 @@ class ARROW_EXPORT FileInterface {
   virtual bool closed() const = 0;
 
   FileMode::type mode() const { return mode_; }
-
-  // Deprecated APIs
-  ARROW_DEPRECATED("Use Result-returning overload")
-  Status Tell(int64_t* position) const;
 
  protected:
   FileInterface() : mode_(FileMode::READ) {}
@@ -153,14 +148,6 @@ class ARROW_EXPORT Readable {
   /// In some cases (e.g. a memory-mapped file), this method may avoid a
   /// memory copy.
   virtual Result<std::shared_ptr<Buffer>> Read(int64_t nbytes) = 0;
-
-  // Deprecated APIs
-
-  ARROW_DEPRECATED("Use Result-returning overload")
-  Status Read(int64_t nbytes, int64_t* bytes_read, void* out);
-
-  ARROW_DEPRECATED("Use Result-returning overload")
-  Status Read(int64_t nbytes, std::shared_ptr<Buffer>* out);
 };
 
 class ARROW_EXPORT OutputStream : virtual public FileInterface, public Writable {
@@ -191,16 +178,14 @@ class ARROW_EXPORT InputStream : virtual public FileInterface, virtual public Re
   /// Zero copy reads imply the use of Buffer-returning Read() overloads.
   virtual bool supports_zero_copy() const;
 
-  // Deprecated APIs
-
-  ARROW_DEPRECATED("Use Result-returning overload")
-  Status Peek(int64_t nbytes, util::string_view* out);
-
  protected:
   InputStream() = default;
 };
 
-class ARROW_EXPORT RandomAccessFile : public InputStream, public Seekable {
+class ARROW_EXPORT RandomAccessFile
+    : public std::enable_shared_from_this<RandomAccessFile>,
+      public InputStream,
+      public Seekable {
  public:
   /// Necessary because we hold a std::unique_ptr
   ~RandomAccessFile() override;
@@ -248,16 +233,16 @@ class ARROW_EXPORT RandomAccessFile : public InputStream, public Seekable {
   /// \return A buffer containing the bytes read, or an error
   virtual Result<std::shared_ptr<Buffer>> ReadAt(int64_t position, int64_t nbytes);
 
-  // Deprecated APIs
+  /// EXPERIMENTAL: Read data asynchronously.
+  virtual Future<std::shared_ptr<Buffer>> ReadAsync(const AsyncContext&, int64_t position,
+                                                    int64_t nbytes);
 
-  ARROW_DEPRECATED("Use Result-returning overload")
-  Status ReadAt(int64_t position, int64_t nbytes, int64_t* bytes_read, void* out);
-
-  ARROW_DEPRECATED("Use Result-returning overload")
-  Status ReadAt(int64_t position, int64_t nbytes, std::shared_ptr<Buffer>* out);
-
-  ARROW_DEPRECATED("Use Result-returning overload")
-  Status GetSize(int64_t* size);
+  /// EXPERIMENTAL: Inform that the given ranges may be read soon.
+  ///
+  /// Some implementations might arrange to prefetch some of the data.
+  /// However, no guarantee is made and the default implementation does nothing.
+  /// For robust prefetching, use ReadAt() or ReadAsync().
+  virtual Status WillNeed(const std::vector<ReadRange>& ranges);
 
  protected:
   RandomAccessFile();

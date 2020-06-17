@@ -20,12 +20,13 @@
 set -e
 
 export ARROW_TEST_DATA=/arrow/testing/data
+export PYARROW_TEST_CYTHON=OFF
 
 python --version
 # Install built wheel
 pip install -q /arrow/python/$WHEEL_DIR/dist/*.whl
 # Install test dependencies (pip won't work after removing system zlib)
-pip install -q -r /arrow/python/requirements-test.txt
+pip install -q -r /arrow/python/requirements-wheel-test.txt
 # Run pyarrow tests
 pytest -rs --pyargs pyarrow
 
@@ -44,5 +45,4 @@ import pyarrow.fs
 import pyarrow._hdfs
 import pyarrow.dataset
 import pyarrow.flight
-import pyarrow.gandiva
 "

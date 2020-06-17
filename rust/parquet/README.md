@@ -59,7 +59,7 @@ version is available. Then simply update version of `parquet-format` crate in Ca
   - [X] Primitive column value readers
   - [X] Row record reader
   - [X] Arrow record reader
-- [X] Statistics support
+- [ ] Statistics support
 - [X] Write support
   - [X] Primitive column value writers
   - [ ] Row record writer
@@ -96,6 +96,10 @@ and optional `verbose` is the boolean flag that allows to print full metadata or
 `Usage: parquet-read <file-path> [num-records]`, where `file-path` is the path to a Parquet file,
 and `num-records` is the number of records to read from a file (when not specified all records will
 be printed).
+
+- **parquet-rowcount** for reporting the number of records in one or more Parquet files.
+`Usage: parquet-rowcount <file-path> ...`, where `file-path` is the path to a Parquet file, and `...`
+indicates any number of additional parquet files.
 
 If you see `Library not loaded` error, please make sure `LD_LIBRARY_PATH` is set properly:
 ```

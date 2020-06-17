@@ -32,36 +32,40 @@
 namespace arrow {
 namespace dataset {
 
-/// \brief GetFragmentsFromSources transforms a vector<Source> into a
+/// \brief GetFragmentsFromDatasets transforms a vector<Dataset> into a
 /// flattened FragmentIterator.
-static inline FragmentIterator GetFragmentsFromSources(
-    const SourceVector& sources, std::shared_ptr<ScanOptions> options) {
-  // Iterator<Source>
-  auto sources_it = MakeVectorIterator(sources);
+inline FragmentIterator GetFragmentsFromDatasets(const DatasetVector& datasets,
+                                                 std::shared_ptr<Expression> predicate) {
+  // Iterator<Dataset>
+  auto datasets_it = MakeVectorIterator(datasets);
 
-  // Source -> Iterator<Fragment>
-  auto fn = [options](std::shared_ptr<Source> source) -> FragmentIterator {
-    return source->GetFragments(options);
+  // Dataset -> Iterator<Fragment>
+  auto fn = [predicate](std::shared_ptr<Dataset> dataset) -> FragmentIterator {
+    return dataset->GetFragments(predicate);
   };
 
   // Iterator<Iterator<Fragment>>
-  auto fragments_it = MakeMapIterator(fn, std::move(sources_it));
+  auto fragments_it = MakeMapIterator(fn, std::move(datasets_it));
 
   // Iterator<Fragment>
   return MakeFlattenIterator(std::move(fragments_it));
 }
 
+inline RecordBatchIterator IteratorFromReader(std::shared_ptr<RecordBatchReader> reader) {
+  return MakeFunctionIterator([reader] { return reader->Next(); });
+}
+
 inline std::shared_ptr<Schema> SchemaFromColumnNames(
     const std::shared_ptr<Schema>& input, const std::vector<std::string>& column_names) {
   std::vector<std::shared_ptr<Field>> columns;
-  for (const auto& name : column_names) {
-    auto field = input->GetFieldByName(name);
-    if (field != nullptr) {
-      columns.push_back(std::move(field));
+  for (FieldRef ref : column_names) {
+    auto maybe_field = ref.GetOne(*input);
+    if (maybe_field.ok()) {
+      columns.push_back(std::move(maybe_field).ValueOrDie());
     }
   }
 
-  return std::make_shared<Schema>(columns);
+  return schema(std::move(columns));
 }
 
 }  // namespace dataset

@@ -30,10 +30,13 @@ RUN apt-get update -y && \
     apt-key adv \
         --keyserver keyserver.ubuntu.com \
         --recv-keys E298A3A825C0D65DFD57CBB651716619E084DAB9 && \
-    # NOTE: as of 2019-12, R 3.5 and 3.6 are available in the repos with -cran35 suffix
+    # NOTE: R 3.5 and 3.6 are available in the repos with -cran35 suffix
+    # for trusty, xenial, bionic, and eoan (as of May 2020)
+    # -cran40 has 4.0 versions for bionic and focal
     # R 3.2, 3.3, 3.4 are available without the suffix but only for trusty and xenial
     # TODO: make sure OS version and R version are valid together and conditionally set repo suffix
-    add-apt-repository 'deb https://cloud.r-project.org/bin/linux/ubuntu '$(lsb_release -cs)'-cran35/' && \
+    # This is a hack to turn 3.6 into 35 and 4.0 into 40:
+    add-apt-repository 'deb https://cloud.r-project.org/bin/linux/ubuntu '$(lsb_release -cs)'-cran'$(echo "${r}" | tr -d . | tr 6 5)'/' && \
     apt-get install -y \
         r-base=${r}* \
         # system libs needed by core R packages
@@ -47,7 +50,11 @@ RUN apt-get update -y && \
         # R CMD CHECK --as-cran needs pdflatex to build the package manual
         texlive-latex-base \
         # Need locales so we can set UTF-8
-        locales && \
+        locales \
+        # Need Python to check py-to-r bridge
+        python3 \
+        python3-pip \
+        python3-dev && \
     locale-gen en_US.UTF-8 && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
@@ -63,6 +70,13 @@ COPY ci/scripts/r_deps.sh /arrow/ci/scripts/
 COPY r/DESCRIPTION /arrow/r/
 RUN /arrow/ci/scripts/r_deps.sh /arrow
 
+# Set up Python 3 and its dependencies
+RUN ln -s /usr/bin/python3 /usr/local/bin/python && \
+    ln -s /usr/bin/pip3 /usr/local/bin/pip
+
+COPY python/requirements-build.txt /arrow/python/
+RUN pip install -r arrow/python/requirements-build.txt
+
 ENV \
     ARROW_BUILD_STATIC=OFF \
     ARROW_BUILD_TESTS=OFF \
@@ -74,5 +88,7 @@ ENV \
     ARROW_ORC=OFF \
     ARROW_PARQUET=ON \
     ARROW_PLASMA=OFF \
+    ARROW_PYTHON=ON \
+    ARROW_USE_CCACHE=ON \
     ARROW_USE_GLOG=OFF \
     LC_ALL=en_US.UTF-8

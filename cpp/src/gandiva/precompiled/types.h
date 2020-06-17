@@ -15,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#ifndef PRECOMPILED_TYPES_H
-#define PRECOMPILED_TYPES_H
+#pragma once
 
 #include <cstdint>
 #include "gandiva/gdv_function_stubs.h"
@@ -34,10 +33,12 @@ using gdv_uint64 = uint64_t;
 using gdv_float32 = float;
 using gdv_float64 = double;
 using gdv_date64 = int64_t;
+using gdv_date32 = int32_t;
 using gdv_time32 = int32_t;
 using gdv_timestamp = int64_t;
 using gdv_utf8 = char*;
 using gdv_binary = char*;
+using gdv_day_time_interval = int64_t;
 
 #ifdef GANDIVA_UNIT_TEST
 // unit tests may be compiled without O2, so inlining may not happen.
@@ -98,9 +99,9 @@ gdv_int64 add_int32_timestamp(gdv_int32, gdv_timestamp);
 gdv_int64 date_add_int64_timestamp(gdv_int64, gdv_timestamp);
 gdv_timestamp add_date64_int64(gdv_date64, gdv_int64);
 
-gdv_int64 date_sub_int32_timestamp(gdv_int32, gdv_timestamp);
-gdv_int64 subtract_int32_timestamp(gdv_int32, gdv_timestamp);
-gdv_int64 date_diff_int64_timestamp(gdv_int64, gdv_timestamp);
+gdv_int64 date_sub_timestamp_int32(gdv_timestamp, gdv_int32);
+gdv_int64 subtract_timestamp_int32(gdv_timestamp, gdv_int32);
+gdv_int64 date_diff_timestamp_int64(gdv_timestamp, gdv_int64);
 
 bool is_distinct_from_timestamp_timestamp(gdv_int64, bool, gdv_int64, bool);
 bool is_not_distinct_from_int32_int32(gdv_int32, bool, gdv_int32, bool);
@@ -159,10 +160,18 @@ bool starts_with_utf8_utf8(const char* data, gdv_int32 data_len, const char* pre
                            gdv_int32 prefix_len);
 bool ends_with_utf8_utf8(const char* data, gdv_int32 data_len, const char* suffix,
                          gdv_int32 suffix_len);
+bool is_substr_utf8_utf8(const char* data, gdv_int32 data_len, const char* substr,
+                         gdv_int32 substr_len);
 
 gdv_int32 utf8_length(gdv_int64 context, const char* data, gdv_int32 data_len);
 
 gdv_date64 castDATE_utf8(int64_t execution_context, const char* input, gdv_int32 length);
+
+gdv_date64 castDATE_int64(gdv_int64 date);
+
+gdv_date64 castDATE_date32(gdv_date32 date);
+
+gdv_date32 castDATE_int32(gdv_int32 date);
 
 gdv_timestamp castTIMESTAMP_utf8(int64_t execution_context, const char* input,
                                  gdv_int32 length);
@@ -207,6 +216,25 @@ const char* replace_utf8_utf8_utf8(gdv_int64 context, const char* text,
                                    gdv_int32 text_len, const char* from_str,
                                    gdv_int32 from_str_len, const char* to_str,
                                    gdv_int32 to_str_len, gdv_int32* out_len);
-}  // extern "C"
 
-#endif  // PRECOMPILED_TYPES_H
+const char* castVARCHAR_int32_int64(int64_t context, int32_t value, int64_t len,
+                                    int32_t* out_len);
+
+const char* castVARCHAR_int64_int64(int64_t context, int64_t value, int64_t len,
+                                    int32_t* out_len);
+
+const char* castVARCHAR_float32_int64(int64_t context, float value, int64_t len,
+                                      int32_t* out_len);
+
+const char* castVARCHAR_float64_int64(int64_t context, double value, int64_t len,
+                                      int32_t* out_len);
+
+int32_t castINT_utf8(int64_t context, const char* data, int32_t len);
+
+int64_t castBIGINT_utf8(int64_t context, const char* data, int32_t len);
+
+float castFLOAT4_utf8(int64_t context, const char* data, int32_t len);
+
+double castFLOAT8_utf8(int64_t context, const char* data, int32_t len);
+
+}  // extern "C"

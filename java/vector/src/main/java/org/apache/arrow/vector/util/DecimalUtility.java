@@ -21,7 +21,8 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
 
-import io.netty.buffer.ArrowBuf;
+import org.apache.arrow.memory.ArrowBuf;
+
 import io.netty.util.internal.PlatformDependent;
 
 /**
@@ -31,8 +32,8 @@ public class DecimalUtility {
   private DecimalUtility() {}
 
   public static final int DECIMAL_BYTE_LENGTH = 16;
-  public static final byte [] zeroes = new byte[] {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
-  public static final byte [] minus_one = new byte[] {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};
+  public static final byte [] zeroes = new byte[] {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  public static final byte [] minus_one = new byte[] {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
 
   /**
    * Read an ArrowType.Decimal at the given value index in the ArrowBuf and convert to a BigDecimal
@@ -73,7 +74,7 @@ public class DecimalUtility {
    */
   public static byte[] getByteArrayFromArrowBuf(ArrowBuf bytebuf, int index) {
     final byte[] value = new byte[DECIMAL_BYTE_LENGTH];
-    final int startIndex = index * DECIMAL_BYTE_LENGTH;
+    final long startIndex = (long) index * DECIMAL_BYTE_LENGTH;
     bytebuf.getBytes(startIndex, value, 0, DECIMAL_BYTE_LENGTH);
     return value;
   }
@@ -96,6 +97,24 @@ public class DecimalUtility {
   }
 
   /**
+   * Check that the decimal scale equals the vectorScale and that the decimal precision is
+   * less than or equal to the vectorPrecision. If not, then an UnsupportedOperationException is
+   * thrown, otherwise returns true.
+   */
+  public static boolean checkPrecisionAndScale(int decimalPrecision, int decimalScale, int vectorPrecision,
+                                               int vectorScale) {
+    if (decimalScale != vectorScale) {
+      throw new UnsupportedOperationException("BigDecimal scale must equal that in the Arrow vector: " +
+          decimalScale + " != " + vectorScale);
+    }
+    if (decimalPrecision > vectorPrecision) {
+      throw new UnsupportedOperationException("BigDecimal precision can not be greater than that in the Arrow " +
+          "vector: " + decimalPrecision + " > " + vectorPrecision);
+    }
+    return true;
+  }
+
+  /**
    * Write the given BigDecimal to the ArrowBuf at the given value index. Will throw an
    * UnsupportedOperationException if the decimal size is greater than the Decimal vector byte
    * width.
@@ -109,7 +128,7 @@ public class DecimalUtility {
    * Write the given long to the ArrowBuf at the given value index.
    */
   public static void writeLongToArrowBuf(long value, ArrowBuf bytebuf, int index) {
-    final long addressOfValue = bytebuf.memoryAddress() + index * DECIMAL_BYTE_LENGTH;
+    final long addressOfValue = bytebuf.memoryAddress() + (long) index * DECIMAL_BYTE_LENGTH;
     PlatformDependent.putLong(addressOfValue, value);
     final long padValue = Long.signum(value) == -1 ? -1L : 0L;
     PlatformDependent.putLong(addressOfValue + Long.BYTES, padValue);
@@ -125,7 +144,7 @@ public class DecimalUtility {
   }
 
   private static void writeByteArrayToArrowBufHelper(byte[] bytes, ArrowBuf bytebuf, int index) {
-    final int startIndex = index * DECIMAL_BYTE_LENGTH;
+    final long startIndex = (long) index * DECIMAL_BYTE_LENGTH;
     if (bytes.length > DECIMAL_BYTE_LENGTH) {
       throw new UnsupportedOperationException("Decimal size greater than 16 bytes");
     }

@@ -38,13 +38,39 @@
 #if defined(PARQUET_USE_BOOST_REGEX)
 #include <boost/regex.hpp>  // IWYU pragma: keep
 using ::boost::regex;
-using ::boost::regex_match;
 using ::boost::smatch;
+
+template <typename... Args>
+static bool regex_match(Args&&... args) {
+  try {
+    return boost::regex_match(std::forward<Args>(args)...);
+  } catch (const boost::regex_error& e) {
+    if (e.code() == boost::regex_constants::error_complexity ||
+        e.code() == boost::regex_constants::error_stack) {
+      // Input-dependent error => return as if matching failed
+      return false;
+    }
+    throw;
+  }
+}
 #else
 #include <regex>
 using ::std::regex;
-using ::std::regex_match;
 using ::std::smatch;
+
+template <typename... Args>
+static bool regex_match(Args&&... args) {
+  try {
+    return std::regex_match(std::forward<Args>(args)...);
+  } catch (const std::regex_error& e) {
+    if (e.code() == std::regex_constants::error_complexity ||
+        e.code() == std::regex_constants::error_stack) {
+      // Input-dependent error => return as if matching failed
+      return false;
+    }
+    throw;
+  }
+}
 #endif
 
 namespace parquet {
@@ -211,8 +237,13 @@ class ColumnChunkMetaData::ColumnChunkMetaDataImpl {
         }
       }
     }
-    for (auto encoding : column_metadata_->encodings) {
-      encodings_.push_back(FromThrift(encoding));
+    for (const auto& encoding : column_metadata_->encodings) {
+      encodings_.push_back(LoadEnumSafe(&encoding));
+    }
+    for (const auto& encoding_stats : column_metadata_->encoding_stats) {
+      encoding_stats_.push_back({LoadEnumSafe(&encoding_stats.page_type),
+                                 LoadEnumSafe(&encoding_stats.encoding),
+                                 encoding_stats.count});
     }
     possible_stats_ = nullptr;
   }
@@ -220,7 +251,7 @@ class ColumnChunkMetaData::ColumnChunkMetaDataImpl {
   inline int64_t file_offset() const { return column_->file_offset; }
   inline const std::string& file_path() const { return column_->file_path; }
 
-  inline Type::type type() const { return FromThrift(column_metadata_->type); }
+  inline Type::type type() const { return LoadEnumSafe(&column_metadata_->type); }
 
   inline int64_t num_values() const { return column_metadata_->num_values; }
 
@@ -252,10 +283,12 @@ class ColumnChunkMetaData::ColumnChunkMetaDataImpl {
   }
 
   inline Compression::type compression() const {
-    return FromThrift(column_metadata_->codec);
+    return LoadEnumSafe(&column_metadata_->codec);
   }
 
   const std::vector<Encoding::type>& encodings() const { return encodings_; }
+
+  const std::vector<PageEncodingStats>& encoding_stats() const { return encoding_stats_; }
 
   inline bool has_dictionary_page() const {
     return column_metadata_->__isset.dictionary_page_offset;
@@ -293,6 +326,7 @@ class ColumnChunkMetaData::ColumnChunkMetaDataImpl {
  private:
   mutable std::shared_ptr<Statistics> possible_stats_;
   std::vector<Encoding::type> encodings_;
+  std::vector<PageEncodingStats> encoding_stats_;
   const format::ColumnChunk* column_;
   const format::ColumnMetaData* column_metadata_;
   format::ColumnMetaData decrypted_metadata_;
@@ -365,6 +399,10 @@ bool ColumnChunkMetaData::can_decompress() const {
 
 const std::vector<Encoding::type>& ColumnChunkMetaData::encodings() const {
   return impl_->encodings();
+}
+
+const std::vector<PageEncodingStats>& ColumnChunkMetaData::encoding_stats() const {
+  return impl_->encoding_stats();
 }
 
 int64_t ColumnChunkMetaData::total_uncompressed_size() const {
@@ -614,6 +652,10 @@ class FileMetaData::FileMetaDataImpl {
   }
 
   void AppendRowGroups(const std::unique_ptr<FileMetaDataImpl>& other) {
+    if (!schema()->Equals(*other->schema())) {
+      throw ParquetException("AppendRowGroups requires equal schemas.");
+    }
+
     format::RowGroup other_rg;
     for (int i = 0; i < other->num_row_groups(); i++) {
       other_rg = other->row_group(i);
@@ -630,10 +672,19 @@ class FileMetaData::FileMetaDataImpl {
   friend FileMetaDataBuilder;
   uint32_t metadata_len_;
   std::unique_ptr<format::FileMetaData> metadata_;
+  SchemaDescriptor schema_;
+  ApplicationVersion writer_version_;
+  std::shared_ptr<const KeyValueMetadata> key_value_metadata_;
+  std::shared_ptr<InternalFileDecryptor> file_decryptor_;
+
   void InitSchema() {
+    if (metadata_->schema.empty()) {
+      throw ParquetException("Empty file schema (no root)");
+    }
     schema_.Init(schema::Unflatten(&metadata_->schema[0],
                                    static_cast<int>(metadata_->schema.size())));
   }
+
   void InitColumnOrders() {
     // update ColumnOrder
     std::vector<parquet::ColumnOrder> column_orders;
@@ -651,8 +702,6 @@ class FileMetaData::FileMetaDataImpl {
 
     schema_.updateColumnOrders(column_orders);
   }
-  SchemaDescriptor schema_;
-  ApplicationVersion writer_version_;
 
   void InitKeyValueMetadata() {
     std::shared_ptr<KeyValueMetadata> metadata = nullptr;
@@ -664,9 +713,6 @@ class FileMetaData::FileMetaDataImpl {
     }
     key_value_metadata_ = std::move(metadata);
   }
-
-  std::shared_ptr<const KeyValueMetadata> key_value_metadata_;
-  std::shared_ptr<InternalFileDecryptor> file_decryptor_;
 };
 
 std::shared_ptr<FileMetaData> FileMetaData::Make(
@@ -966,7 +1012,10 @@ class ColumnChunkMetaDataBuilder::ColumnChunkMetaDataBuilderImpl {
   void Finish(int64_t num_values, int64_t dictionary_page_offset,
               int64_t index_page_offset, int64_t data_page_offset,
               int64_t compressed_size, int64_t uncompressed_size, bool has_dictionary,
-              bool dictionary_fallback, const std::shared_ptr<Encryptor>& encryptor) {
+              bool dictionary_fallback,
+              const std::map<Encoding::type, int32_t>& dict_encoding_stats,
+              const std::map<Encoding::type, int32_t>& data_encoding_stats,
+              const std::shared_ptr<Encryptor>& encryptor) {
     if (dictionary_page_offset > 0) {
       column_chunk_->meta_data.__set_dictionary_page_offset(dictionary_page_offset);
       column_chunk_->__set_file_offset(dictionary_page_offset + compressed_size);
@@ -1000,6 +1049,24 @@ class ColumnChunkMetaDataBuilder::ColumnChunkMetaDataBuilderImpl {
       thrift_encodings.push_back(ToThrift(Encoding::PLAIN));
     }
     column_chunk_->meta_data.__set_encodings(thrift_encodings);
+    std::vector<format::PageEncodingStats> thrift_encoding_stats;
+    // Add dictionary page encoding stats
+    for (const auto& entry : dict_encoding_stats) {
+      format::PageEncodingStats dict_enc_stat;
+      dict_enc_stat.__set_page_type(format::PageType::DICTIONARY_PAGE);
+      dict_enc_stat.__set_encoding(ToThrift(entry.first));
+      dict_enc_stat.__set_count(entry.second);
+      thrift_encoding_stats.push_back(dict_enc_stat);
+    }
+    // Add data page encoding stats
+    for (const auto& entry : data_encoding_stats) {
+      format::PageEncodingStats data_enc_stat;
+      data_enc_stat.__set_page_type(format::PageType::DATA_PAGE);
+      data_enc_stat.__set_encoding(ToThrift(entry.first));
+      data_enc_stat.__set_count(entry.second);
+      thrift_encoding_stats.push_back(data_enc_stat);
+    }
+    column_chunk_->meta_data.__set_encoding_stats(thrift_encoding_stats);
 
     const auto& encrypt_md =
         properties_->column_encryption_properties(column_->path()->ToDotString());
@@ -1117,16 +1184,16 @@ void ColumnChunkMetaDataBuilder::set_file_path(const std::string& path) {
   impl_->set_file_path(path);
 }
 
-void ColumnChunkMetaDataBuilder::Finish(int64_t num_values,
-                                        int64_t dictionary_page_offset,
-                                        int64_t index_page_offset,
-                                        int64_t data_page_offset, int64_t compressed_size,
-                                        int64_t uncompressed_size, bool has_dictionary,
-                                        bool dictionary_fallback,
-                                        const std::shared_ptr<Encryptor>& encryptor) {
+void ColumnChunkMetaDataBuilder::Finish(
+    int64_t num_values, int64_t dictionary_page_offset, int64_t index_page_offset,
+    int64_t data_page_offset, int64_t compressed_size, int64_t uncompressed_size,
+    bool has_dictionary, bool dictionary_fallback,
+    const std::map<Encoding::type, int32_t>& dict_encoding_stats,
+    const std::map<Encoding::type, int32_t>& data_encoding_stats,
+    const std::shared_ptr<Encryptor>& encryptor) {
   impl_->Finish(num_values, dictionary_page_offset, index_page_offset, data_page_offset,
                 compressed_size, uncompressed_size, has_dictionary, dictionary_fallback,
-                encryptor);
+                dict_encoding_stats, data_encoding_stats, encryptor);
 }
 
 void ColumnChunkMetaDataBuilder::WriteTo(::arrow::io::OutputStream* sink) {

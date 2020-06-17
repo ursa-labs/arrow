@@ -644,7 +644,7 @@ class StringConverter
 
       auto binary_type =
           TypeTraits<typename TypeClass::EquivalentBinaryType>::type_singleton();
-      return (*out)->View(binary_type, out);
+      return (*out)->View(binary_type).Value(out);
     }
     return Status::OK();
   }
@@ -922,7 +922,7 @@ class StructConverter
     auto struct_type = checked_pointer_cast<StructType>(builder->type());
 
     num_fields_ = this->typed_builder_->num_fields();
-    DCHECK_EQ(num_fields_, struct_type->num_children());
+    DCHECK_EQ(num_fields_, struct_type->num_fields());
 
     field_name_bytes_list_.reset(PyList_New(num_fields_));
     field_name_unicode_list_.reset(PyList_New(num_fields_));
@@ -930,8 +930,8 @@ class StructConverter
 
     // Initialize the child converters and field names
     for (int i = 0; i < num_fields_; i++) {
-      const std::string& field_name(struct_type->child(i)->name());
-      std::shared_ptr<DataType> field_type(struct_type->child(i)->type());
+      const std::string& field_name(struct_type->field(i)->name());
+      std::shared_ptr<DataType> field_type(struct_type->field(i)->type());
 
       std::unique_ptr<SeqConverter> value_converter;
       RETURN_NOT_OK(
@@ -954,7 +954,7 @@ class StructConverter
 
   Status AppendItem(PyObject* obj) {
     RETURN_NOT_OK(this->typed_builder_->Append());
-    // Note heterogenous sequences are not allowed
+    // Note heterogeneous sequences are not allowed
     if (ARROW_PREDICT_FALSE(source_kind_ == SourceKind::UNKNOWN)) {
       if (PyDict_Check(obj)) {
         source_kind_ = SourceKind::DICTS;

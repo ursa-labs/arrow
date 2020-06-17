@@ -24,26 +24,43 @@ source_dir=${1}/r
 
 pushd ${source_dir}
 
+printenv
+
 if [ "$ARROW_USE_PKG_CONFIG" != "false" ]; then
   export LD_LIBRARY_PATH=${ARROW_HOME}/lib:${LD_LIBRARY_PATH}
   export R_LD_LIBRARY_PATH=${LD_LIBRARY_PATH}
 fi
-if [ "$ARROW_R_CXXFLAGS" != "" ]; then
-  export _R_CHECK_COMPILATION_FLAGS_=FALSE
+export _R_CHECK_COMPILATION_FLAGS_KNOWN_=${ARROW_R_CXXFLAGS}
+if [ "$ARROW_R_DEV" = "TRUE" ]; then
+  # These are used in the Arrow C++ build and are not a problem
+  export _R_CHECK_COMPILATION_FLAGS_KNOWN_="${_R_CHECK_COMPILATION_FLAGS_KNOWN_} -Wno-attributes -msse4.2"
+  # Note that NOT_CRAN=true means (among other things) that optional dependencies are built
+  export NOT_CRAN=true
 fi
 export TEST_R_WITH_ARROW=TRUE
 export _R_CHECK_TESTS_NLINES_=0
 export _R_CHECK_CRAN_INCOMING_REMOTE_=FALSE
 export _R_CHECK_LIMIT_CORES_=FALSE
-export VERSION=$(grep ^Version DESCRIPTION | sed s/Version:\ //)
+# By default, aws-sdk tries to contact a non-existing local ip host
+# to retrieve metadata. Disable this so that S3FileSystem tests run faster.
+export AWS_EC2_METADATA_DISABLED=TRUE
+
+# Hack so that texlive2020 doesn't pollute the home dir
+export TEXMFCONFIG=/tmp/texmf-config
+export TEXMFVAR=/tmp/texmf-var
 
 # Make sure we aren't writing to the home dir (CRAN _hates_ this but there is no official check)
 BEFORE=$(ls -alh ~/)
 
-${R_BIN} -e "rcmdcheck::rcmdcheck(build_args = '--no-build-vignettes', args = c('--no-manual', '--as-cran', '--ignore-vignettes', '--run-donttest'), error_on = 'warning', check_dir = 'check')"
+${R_BIN} -e "as_cran <- !identical(tolower(Sys.getenv('NOT_CRAN')), 'true')
+  if (as_cran) {
+    rcmdcheck::rcmdcheck(args = c('--as-cran', '--run-donttest'), error_on = 'warning', check_dir = 'check')
+  } else {
+    rcmdcheck::rcmdcheck(build_args = '--no-build-vignettes', args = c('--no-manual', '--ignore-vignettes', '--run-donttest'), error_on = 'warning', check_dir = 'check')
+  }"
 
 AFTER=$(ls -alh ~/)
-if [ "$BEFORE" != "$AFTER" ]; then
+if [ "$NOT_CRAN" != "true" ] && [ "$BEFORE" != "$AFTER" ]; then
   ls -alh ~/.cmake/packages
   exit 1
 fi

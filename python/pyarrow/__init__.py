@@ -17,7 +17,19 @@
 
 # flake8: noqa
 
+"""
+PyArrow is the python implementation of Apache Arrow.
 
+Apache Arrow is a cross-language development platform for in-memory data.
+It specifies a standardized language-independent columnar memory format for
+flat and hierarchical data, organized for efficient analytic operations on
+modern hardware. It also provides computational libraries and zero-copy
+streaming messaging and interprocess communication.
+
+For more information see the official page at https://arrow.apache.org
+"""
+
+import gc as _gc
 import os as _os
 import sys as _sys
 
@@ -28,6 +40,7 @@ except ImportError:
     try:
         import setuptools_scm
         # Code duplicated from setup.py to avoid a dependency on each other
+
         def parse_git(root, **kwargs):
             """
             Parse function for setuptools_scm that ignores tags for non-C++
@@ -42,8 +55,13 @@ except ImportError:
     except ImportError:
         __version__ = None
 
-
-import pyarrow.compat as compat
+# ARROW-8684: Disable GC while initializing Cython extension module,
+# to workaround Cython bug in https://github.com/cython/cython/issues/3603
+_gc_enabled = _gc.isenabled()
+_gc.disable()
+import pyarrow.lib as _lib
+if _gc_enabled:
+    _gc.enable()
 
 from pyarrow.lib import cpu_count, set_cpu_count
 from pyarrow.lib import (null, bool_,
@@ -66,12 +84,15 @@ from pyarrow.lib import (null, bool_,
                          PyExtensionType, UnknownExtensionType,
                          register_extension_type, unregister_extension_type,
                          DictionaryMemo,
+                         KeyValueMetadata,
                          Field,
                          Schema,
                          schema,
+                         unify_schemas,
                          Array, Tensor,
                          array, chunked_array, record_batch, table,
-                         SparseCSRMatrix, SparseCOOTensor,
+                         SparseCOOTensor, SparseCSRMatrix, SparseCSCMatrix,
+                         SparseCSFTensor,
                          infer_type, from_numpy_dtype,
                          NullArray,
                          NumericArray, IntegerArray, FloatingPointArray,
@@ -105,7 +126,7 @@ from pyarrow.lib import (null, bool_,
 
 # Buffers, allocation
 from pyarrow.lib import (Buffer, ResizableBuffer, foreign_buffer, py_buffer,
-                         compress, decompress, allocate_buffer)
+                         Codec, compress, decompress, allocate_buffer)
 
 from pyarrow.lib import (MemoryPool, LoggingMemoryPool, ProxyMemoryPool,
                          total_allocated_bytes, set_memory_pool,
@@ -149,15 +170,7 @@ from pyarrow.filesystem import FileSystem, LocalFileSystem
 from pyarrow.hdfs import HadoopFileSystem
 import pyarrow.hdfs as hdfs
 
-from pyarrow.ipc import (Message, MessageReader,
-                         RecordBatchFileReader, RecordBatchFileWriter,
-                         RecordBatchStreamReader, RecordBatchStreamWriter,
-                         read_message, read_record_batch, read_schema,
-                         read_tensor, write_tensor,
-                         get_record_batch_size, get_tensor_size,
-                         open_stream,
-                         open_file,
-                         serialize_pandas, deserialize_pandas)
+from pyarrow.ipc import serialize_pandas, deserialize_pandas
 import pyarrow.ipc as ipc
 
 
@@ -170,6 +183,7 @@ from pyarrow.serialization import (default_serialization_context,
 import pyarrow.types as types
 
 # Entry point for starting the plasma store
+
 
 def _plasma_store_entry_point():
     """Entry point for starting the plasma store.
@@ -187,11 +201,48 @@ def _plasma_store_entry_point():
 # ----------------------------------------------------------------------
 # Deprecations
 
+
 from pyarrow.util import _deprecate_api  # noqa
+
+read_message = _deprecate_api("read_message", "ipc.read_message",
+                              ipc.read_message, "0.17.0")
+
+read_record_batch = _deprecate_api("read_record_batch",
+                                   "ipc.read_record_batch",
+                                   ipc.read_record_batch, "0.17.0")
+
+read_schema = _deprecate_api("read_schema", "ipc.read_schema",
+                             ipc.read_schema, "0.17.0")
+
+read_tensor = _deprecate_api("read_tensor", "ipc.read_tensor",
+                             ipc.read_tensor, "0.17.0")
+
+write_tensor = _deprecate_api("write_tensor", "ipc.write_tensor",
+                              ipc.write_tensor, "0.17.0")
+
+get_record_batch_size = _deprecate_api("get_record_batch_size",
+                                       "ipc.get_record_batch_size",
+                                       ipc.get_record_batch_size, "0.17.0")
+
+get_tensor_size = _deprecate_api("get_tensor_size",
+                                 "ipc.get_tensor_size",
+                                 ipc.get_tensor_size, "0.17.0")
+
+open_stream = _deprecate_api("open_stream", "ipc.open_stream",
+                             ipc.open_stream, "0.17.0")
+
+open_file = _deprecate_api("open_file", "ipc.open_file", ipc.open_file,
+                           "0.17.0")
+
+# TODO: Deprecate these somehow in the pyarrow namespace
+from pyarrow.ipc import (Message, MessageReader,
+                         RecordBatchFileReader, RecordBatchFileWriter,
+                         RecordBatchStreamReader, RecordBatchStreamWriter)
 
 # ----------------------------------------------------------------------
 # Returning absolute path to the pyarrow include directory (if bundled, e.g. in
 # wheels)
+
 
 def get_include():
     """
@@ -231,6 +282,49 @@ def get_libraries():
     or Cython extensions using pyarrow
     """
     return ['arrow', 'arrow_python']
+
+
+def create_library_symlinks():
+    """
+    With Linux and macOS wheels, the bundled shared libraries have an embedded
+    ABI version like libarrow.so.17 or libarrow.17.dylib and so linking to them
+    with -larrow won't work unless we create symlinks at locations like
+    site-packages/pyarrow/libarrow.so. This unfortunate workaround addresses
+    prior problems we had with shipping two copies of the shared libraries to
+    permit third party projects like turbodbc to build their C++ extensions
+    against the pyarrow wheels.
+
+    This function must only be invoked once and only when the shared libraries
+    are bundled with the Python package, which should only apply to wheel-based
+    installs. It requires write access to the site-packages/pyarrow directory
+    and so depending on your system may need to be run with root.
+    """
+    import glob
+    if _sys.platform == 'win32':
+        return
+    package_cwd = _os.path.dirname(__file__)
+
+    if _sys.platform == 'linux':
+        bundled_libs = glob.glob(_os.path.join(package_cwd, '*.so.*'))
+
+        def get_symlink_path(hard_path):
+            return hard_path.rsplit('.', 1)[0]
+    else:
+        bundled_libs = glob.glob(_os.path.join(package_cwd, '*.*.dylib'))
+
+        def get_symlink_path(hard_path):
+            return '.'.join((hard_path.split('.')[0], 'dylib'))
+
+    for lib_hard_path in bundled_libs:
+        symlink_path = get_symlink_path(lib_hard_path)
+        if _os.path.exists(symlink_path):
+            continue
+        try:
+            _os.symlink(lib_hard_path, symlink_path)
+        except PermissionError:
+            print("Tried creating symlink {}. If you need to link to "
+                  "bundled shared libraries, run "
+                  "pyarrow._setup_bundled_symlinks() as root")
 
 
 def get_library_dirs():

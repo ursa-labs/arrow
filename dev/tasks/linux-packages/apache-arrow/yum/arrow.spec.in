@@ -37,7 +37,7 @@
   fi)
 
 %define use_flight (%{_centos_ver} >= 8)
-%define use_gandiva (%{_centos_ver} >= 8)
+%define use_gandiva (%{_centos_ver} >= 8 && %{_arch} != "aarch64")
 %define use_ninja (%{_centos_ver} >= 8)
 %define use_parquet (%{_centos_ver} >= 7)
 
@@ -45,6 +45,7 @@
 %define use_meson (%{_centos_ver} >= 8)
 
 %define have_rapidjson (%{_centos_ver} == 7)
+%define have_zstd (%{_centos_ver} < 8)
 
 Name:		@PACKAGE@
 Version:	@VERSION@
@@ -63,12 +64,16 @@ BuildRequires:	brotli-devel
 BuildRequires:	bzip2-devel
 BuildRequires:	cmake%{cmake_version}
 BuildRequires:	gcc-c++
+%if %{_centos_ver} >= 7
 BuildRequires:	gflags-devel
+%endif
 BuildRequires:	git
 %if %{_centos_ver} >= 7
 BuildRequires:	glog-devel
 %endif
+%if %{have_zstd}
 BuildRequires:	libzstd-devel
+%endif
 BuildRequires:	lz4-devel
 BuildRequires:	pkgconfig
 BuildRequires:	python%{python_version}-devel
@@ -135,6 +140,7 @@ cd cpp/build
   -DARROW_WITH_ZLIB=ON \
   -DARROW_WITH_ZSTD=ON \
   -DCMAKE_BUILD_TYPE=$cpp_build_type \
+  -DCMAKE_UNITY_BUILD=ON \
   -DPythonInterp_FIND_VERSION=ON \
   -DPythonInterp_FIND_VERSION_MAJOR=3 \
 %if %{use_ninja}
@@ -145,33 +151,6 @@ cd cpp/build
 ninja
 %else
 make %{?_smp_mflags}
-%endif
-cd -
-
-%if %{use_glib} && !%{use_meson}
-cd c_glib
-./autogen.sh
-%configure \
-  --with-arrow-cpp-build-dir=$PWD/../cpp/build \
-  --with-arrow-cpp-build-type=$cpp_build_type \
-  --enable-gtk-doc
-sed -i 's|^hardcode_libdir_flag_spec=.*|hardcode_libdir_flag_spec=""|g' libtool
-sed -i 's|^runpath_var=LD_RUN_PATH|runpath_var=DIE_RPATH_DIE|g' libtool
-ld_library_path=$PWD/arrow-glib/.libs/
-ld_library_path=$ld_library_path:$PWD/plasma-glib/.libs/
-ld_library_path=$ld_library_path:$PWD/parquet-glib/.libs/
-ld_library_path=$ld_library_path:$PWD/../cpp/build/$cpp_build_type
-LD_LIBRARY_PATH=$ld_library_path make %{?_smp_mflags}
-cd -
-%endif
-
-%install
-cpp_build_type=release
-cd cpp/build
-%if %{use_ninja}
-DESTDIR=$RPM_BUILD_ROOT ninja install
-%else
-make install DESTDIR=$RPM_BUILD_ROOT
 %endif
 cd -
 
@@ -186,16 +165,50 @@ meson setup build \
   -Darrow_cpp_build_dir=../cpp/build \
   -Darrow_cpp_build_type=$cpp_build_type \
   -Dgtk_doc=true
-LD_LIBRARY_PATH=$PWD/../cpp/build/$cpp_build_type \
-  ninja -C build all
-DESTDIR=$RPM_BUILD_ROOT \
-  ninja -C build install
+LD_LIBRARY_PATH=$PWD/../cpp/build/$cpp_build_type ninja -C build
   %else
-make install DESTDIR=$RPM_BUILD_ROOT
-rm $RPM_BUILD_ROOT%{_libdir}/*.la
+./autogen.sh
+%configure \
+  --with-arrow-cpp-build-dir=$PWD/../cpp/build \
+  --with-arrow-cpp-build-type=$cpp_build_type \
+  --enable-gtk-doc
+sed -i 's|^hardcode_libdir_flag_spec=.*|hardcode_libdir_flag_spec=""|g' libtool
+sed -i 's|^runpath_var=LD_RUN_PATH|runpath_var=DIE_RPATH_DIE|g' libtool
+ld_library_path=$PWD/arrow-glib/.libs/
+ld_library_path=$ld_library_path:$PWD/arrow-dataset-glib/.libs/
+ld_library_path=$ld_library_path:$PWD/parquet-glib/.libs/
+ld_library_path=$ld_library_path:$PWD/plasma-glib/.libs/
+ld_library_path=$ld_library_path:$PWD/../cpp/build/$cpp_build_type
+LD_LIBRARY_PATH=$ld_library_path make %{?_smp_mflags}
   %endif
 cd -
 %endif
+
+%install
+cpp_build_type=release
+
+%if %{use_glib}
+cd c_glib
+  %if %{use_meson}
+DESTDIR=$RPM_BUILD_ROOT ninja -C build install
+ninja -C build clean
+  %else
+make install DESTDIR=$RPM_BUILD_ROOT
+rm $RPM_BUILD_ROOT%{_libdir}/*.la
+make clean
+  %endif
+cd -
+%endif
+
+cd cpp/build
+%if %{use_ninja}
+DESTDIR=$RPM_BUILD_ROOT ninja install
+ninja clean
+%else
+make install DESTDIR=$RPM_BUILD_ROOT
+make clean
+%endif
+cd -
 
 %package libs
 Summary:	Runtime libraries for Apache Arrow C++
@@ -206,11 +219,13 @@ Requires:	boost%{boost_version}-filesystem
 Requires:	boost%{boost_version}-regex
 Requires:	brotli
 %endif
-Requires:	gflags
 %if %{_centos_ver} >= 7
+Requires:	gflags
 Requires:	glog
 %endif
+%if %{have_zstd}
 Requires:	libzstd
+%endif
 Requires:	lz4
 %if %{_centos_ver} >= 8
 Requires:	re2
@@ -567,7 +582,52 @@ Documentation for Apache Arrow GLib.
 %{_docdir}/arrow-glib/
 %{_datadir}/gtk-doc/html/arrow-glib/
 
-%if %{use_flight} && %{use_glib}
+%package dataset-glib-libs
+Summary:	Runtime libraries for Apache Arrow Datasets GLib
+License:	Apache-2.0
+Requires:	%{name}-dataset-libs = %{version}-%{release}
+Requires:	%{name}-glib-libs = %{version}-%{release}
+
+%description dataset-glib-libs
+This package contains the libraries for Apache Arrow Datasets GLib.
+
+%files dataset-glib-libs
+%defattr(-,root,root,-)
+%doc README.md LICENSE.txt NOTICE.txt
+%{_libdir}/libarrow-dataset-glib.so.*
+%{_datadir}/gir-1.0/ArrowDataset-1.0.gir
+
+%package dataset-glib-devel
+Summary:	Libraries and header files for Apache Arrow Datasets GLib
+License:	Apache-2.0
+Requires:	%{name}-dataset-devel = %{version}-%{release}
+Requires:	%{name}-glib-devel = %{version}-%{release}
+
+%description dataset-glib-devel
+Libraries and header files for Apache Arrow Datasets GLib.
+
+%files dataset-glib-devel
+%defattr(-,root,root,-)
+%doc README.md LICENSE.txt NOTICE.txt
+%{_includedir}/arrow-dataset-glib/
+%{_libdir}/libarrow-dataset-glib.a
+%{_libdir}/libarrow-dataset-glib.so
+%{_libdir}/pkgconfig/arrow-dataset-glib.pc
+%{_libdir}/girepository-1.0/ArrowDataset-1.0.typelib
+
+%package dataset-glib-doc
+Summary:	Documentation for Apache Arrow Datasets GLib
+License:	Apache-2.0
+
+%description dataset-glib-doc
+Documentation for Apache Arrow Datasets GLib.
+
+%files dataset-glib-doc
+%defattr(-,root,root,-)
+%doc README.md LICENSE.txt NOTICE.txt
+%{_datadir}/gtk-doc/html/arrow-dataset-glib/
+
+  %if %{use_gandiva}
 %package -n gandiva-glib-libs
 Summary:	Runtime libraries for Gandiva GLib
 License:	Apache-2.0
@@ -612,7 +672,7 @@ Documentation for Gandiva GLib.
 %defattr(-,root,root,-)
 %doc README.md LICENSE.txt NOTICE.txt
 %{_datadir}/gtk-doc/html/gandiva-glib/
-%endif
+  %endif
 
 %package -n plasma-glib-libs
 Summary:	Runtime libraries for Plasma GLib
@@ -658,9 +718,8 @@ Documentation for Plasma GLib.
 %defattr(-,root,root,-)
 %doc README.md LICENSE.txt NOTICE.txt
 %{_datadir}/gtk-doc/html/plasma-glib/
-%endif
 
-%if %{use_parquet} && %{use_glib}
+  %if %{use_parquet}
 %package -n parquet-glib-libs
 Summary:	Runtime libraries for Apache Parquet GLib
 License:	Apache-2.0
@@ -705,9 +764,13 @@ Documentation for Apache Parquet GLib.
 %defattr(-,root,root,-)
 %doc README.md LICENSE.txt NOTICE.txt
 %{_datadir}/gtk-doc/html/parquet-glib/
+  %endif
 %endif
 
 %changelog
+* Thu Apr 16 2020 Krisztián Szűcs <szucs.krisztian@gmail.com> - 0.17.0-1
+- New upstream release.
+
 * Thu Jan 30 2020 Krisztián Szűcs <szucs.krisztian@gmail.com> - 0.16.0-1
 - New upstream release.
 

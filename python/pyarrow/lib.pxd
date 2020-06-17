@@ -28,7 +28,6 @@ cdef extern from "Python.h":
     int PySlice_Check(object)
 
 
-cdef CFunctionContext* _context() nogil
 cdef int check_status(const CStatus& status) nogil except -1
 
 cdef class Message:
@@ -54,7 +53,7 @@ cdef class DataType:
         object __weakref__
 
     cdef void init(self, const shared_ptr[CDataType]& type) except *
-    cdef Field child(self, int i)
+    cdef Field field(self, int i)
 
 
 cdef class ListType(DataType):
@@ -81,7 +80,6 @@ cdef class StructType(DataType):
     cdef:
         const CStructType* struct_type
 
-    cdef Field field(self, int i)
     cdef Field field_by_name(self, name)
 
 
@@ -140,6 +138,24 @@ cdef class ExtensionType(BaseExtensionType):
 
 cdef class PyExtensionType(ExtensionType):
     pass
+
+
+cdef class _Metadata:
+    # required because KeyValueMetadata also extends collections.abc.Mapping
+    # and the first parent class must be an extension type
+    pass
+
+
+cdef class KeyValueMetadata(_Metadata):
+    cdef:
+        shared_ptr[const CKeyValueMetadata] wrapped
+        const CKeyValueMetadata* metadata
+
+    cdef void init(self, const shared_ptr[const CKeyValueMetadata]& wrapped)
+
+    @staticmethod
+    cdef wrap(const shared_ptr[const CKeyValueMetadata]& sp)
+    cdef inline shared_ptr[const CKeyValueMetadata] unwrap(self) nogil
 
 
 cdef class Field:
@@ -303,6 +319,17 @@ cdef class SparseCSRMatrix:
     cdef void init(self, const shared_ptr[CSparseCSRMatrix]& sp_sparse_tensor)
 
 
+cdef class SparseCSCMatrix:
+    cdef:
+        shared_ptr[CSparseCSCMatrix] sp_sparse_tensor
+        CSparseCSCMatrix* stp
+
+    cdef readonly:
+        DataType type
+
+    cdef void init(self, const shared_ptr[CSparseCSCMatrix]& sp_sparse_tensor)
+
+
 cdef class SparseCOOTensor:
     cdef:
         shared_ptr[CSparseCOOTensor] sp_sparse_tensor
@@ -312,6 +339,17 @@ cdef class SparseCOOTensor:
         DataType type
 
     cdef void init(self, const shared_ptr[CSparseCOOTensor]& sp_sparse_tensor)
+
+
+cdef class SparseCSFTensor:
+    cdef:
+        shared_ptr[CSparseCSFTensor] sp_sparse_tensor
+        CSparseCSFTensor* stp
+
+    cdef readonly:
+        DataType type
+
+    cdef void init(self, const shared_ptr[CSparseCSFTensor]& sp_sparse_tensor)
 
 
 cdef class NullArray(Array):
@@ -529,17 +567,12 @@ cdef class _CRecordBatchReader:
         shared_ptr[CRecordBatchReader] reader
 
 
-cdef class CastOptions:
+cdef class Codec:
     cdef:
-        CCastOptions options
+        unique_ptr[CCodec] wrapped
 
-    @staticmethod
-    cdef wrap(CCastOptions options)
+    cdef inline CCodec* unwrap(self) nogil
 
-    cdef inline CCastOptions unwrap(self) nogil
-
-
-cdef CompressionType _get_compression_type(object name) except *
 
 cdef get_input_stream(object source, c_bool use_memory_map,
                       shared_ptr[CInputStream]* reader)
@@ -548,7 +581,7 @@ cdef get_reader(object source, c_bool use_memory_map,
 cdef get_writer(object source, shared_ptr[COutputStream]* writer)
 
 # Default is allow_none=False
-cdef DataType ensure_type(object type, c_bool allow_none=*)
+cpdef DataType ensure_type(object type, bint allow_none=*)
 
 # Exceptions may be raised when converting dict values, so need to
 # check exception state on return
@@ -565,7 +598,6 @@ cdef public object pyarrow_wrap_scalar(const shared_ptr[CScalar]& sp_scalar)
 cdef public object pyarrow_wrap_array(const shared_ptr[CArray]& sp_array)
 cdef public object pyarrow_wrap_chunked_array(
     const shared_ptr[CChunkedArray]& sp_array)
-# XXX pyarrow.h calls it `wrap_record_batch`
 cdef public object pyarrow_wrap_batch(const shared_ptr[CRecordBatch]& cbatch)
 cdef public object pyarrow_wrap_buffer(const shared_ptr[CBuffer]& buf)
 cdef public object pyarrow_wrap_data_type(const shared_ptr[CDataType]& type)
@@ -579,9 +611,15 @@ cdef public object pyarrow_wrap_sparse_coo_tensor(
     const shared_ptr[CSparseCOOTensor]& sp_sparse_tensor)
 cdef public object pyarrow_wrap_sparse_csr_matrix(
     const shared_ptr[CSparseCSRMatrix]& sp_sparse_tensor)
+cdef public object pyarrow_wrap_sparse_csc_matrix(
+    const shared_ptr[CSparseCSCMatrix]& sp_sparse_tensor)
+cdef public object pyarrow_wrap_sparse_csf_tensor(
+    const shared_ptr[CSparseCSFTensor]& sp_sparse_tensor)
 
 cdef public shared_ptr[CScalar] pyarrow_unwrap_scalar(object scalar)
 cdef public shared_ptr[CArray] pyarrow_unwrap_array(object array)
+cdef public shared_ptr[CChunkedArray] pyarrow_unwrap_chunked_array(
+    object array)
 cdef public shared_ptr[CRecordBatch] pyarrow_unwrap_batch(object batch)
 cdef public shared_ptr[CBuffer] pyarrow_unwrap_buffer(object buffer)
 cdef public shared_ptr[CDataType] pyarrow_unwrap_data_type(object data_type)
@@ -592,4 +630,8 @@ cdef public shared_ptr[CTensor] pyarrow_unwrap_tensor(object tensor)
 cdef public shared_ptr[CSparseCOOTensor] pyarrow_unwrap_sparse_coo_tensor(
     object sparse_tensor)
 cdef public shared_ptr[CSparseCSRMatrix] pyarrow_unwrap_sparse_csr_matrix(
+    object sparse_tensor)
+cdef public shared_ptr[CSparseCSCMatrix] pyarrow_unwrap_sparse_csc_matrix(
+    object sparse_tensor)
+cdef public shared_ptr[CSparseCSFTensor] pyarrow_unwrap_sparse_csf_tensor(
     object sparse_tensor)
